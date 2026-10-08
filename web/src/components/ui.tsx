@@ -36,3 +36,19 @@ export function Field({ label, id, ...input }: { label: string; id: string } & I
     </div>
   );
 }
+
+/**
+ * A checkbox with its explanation, drawn as a selectable card: the whole card is the click target, a checked one
+ * is tinted and outlined in the accent, and the box itself is custom-drawn so it matches both themes.
+ */
+export function Checkbox({ label, hint, className = "", ...input }: { label: string; hint?: string } & Omit<InputHTMLAttributes<HTMLInputElement>, "type">) {
+  return (
+    <label className={`cb ${className}`.trim()}>
+      <input type="checkbox" {...input} />
+      <span className="cb__text">
+        <span className="cb__label">{label}</span>
+        {hint && <span className="cb__hint">{hint}</span>}
+      </span>
+    </label>
+  );
+}

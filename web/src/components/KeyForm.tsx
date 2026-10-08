@@ -2,7 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import { emptyForm, validateKeyForm, type KeyFormValues } from "@/lib/format";
-import { Button } from "./ui";
+import { Button, Checkbox } from "./ui";
 
 function Err({ id, text }: { id: string; text?: string }) {
   return text ? (
@@ -45,42 +45,32 @@ export function KeyForm({
 
   return (
     <form onSubmit={submit} className={`kform${layout === "inline" ? " kform--inline" : ""}`} noValidate>
-      <div>
-        <label className="lab" htmlFor="key-name">Name</label>
-        <input id="key-name" autoFocus={autoFocus} className="inp" type="text" placeholder="For example, ci-pipeline" value={v.name}
-          onChange={(e) => setV({ ...v, name: e.target.value })} aria-invalid={!!shown.name} aria-describedby={shown.name ? "key-name-err" : undefined} />
-        <Err id="key-name-err" text={shown.name} />
-      </div>
-      <div className="kform__two">
+      <div className="kform__fields">
+        <div className="kform__name">
+          <label className="lab" htmlFor="key-name">Name</label>
+          <input id="key-name" autoFocus={autoFocus} className="inp" type="text" placeholder="For example, ci-pipeline" value={v.name}
+            onChange={(e) => setV({ ...v, name: e.target.value })} aria-invalid={!!shown.name} aria-describedby={shown.name ? "key-name-err" : undefined} />
+          <Err id="key-name-err" text={shown.name} />
+        </div>
         <div>
           <label className="lab" htmlFor="key-rpm">Requests a minute</label>
           <input id="key-rpm" className="inp num" type="text" inputMode="numeric" placeholder="No limit" value={v.rpm}
             onChange={(e) => setV({ ...v, rpm: e.target.value })} aria-invalid={!!shown.rpm} aria-describedby={shown.rpm ? "key-rpm-err" : undefined} />
+          <Err id="key-rpm-err" text={shown.rpm} />
         </div>
         <div>
           <label className="lab" htmlFor="key-budget">Monthly budget (USD)</label>
           <input id="key-budget" className="inp num" type="text" inputMode="decimal" placeholder="No limit" value={v.budget}
             onChange={(e) => setV({ ...v, budget: e.target.value })} aria-invalid={!!shown.budget} aria-describedby={shown.budget ? "key-budget-err" : undefined} />
+          <Err id="key-budget-err" text={shown.budget} />
         </div>
       </div>
-      <Err id="key-rpm-err" text={shown.rpm} />
-      <Err id="key-budget-err" text={shown.budget} />
-      <label className="chk">
-        <input type="checkbox" checked={v.semanticCache} onChange={(e) => setV({ ...v, semanticCache: e.target.checked })} />
-        <span>
-          Use the semantic cache
-          <br />
-          <span className="small">Returns saved answers for near-identical questions.</span>
-        </span>
-      </label>
-      <label className="chk">
-        <input type="checkbox" checked={v.cacheNonzeroTemp} onChange={(e) => setV({ ...v, cacheNonzeroTemp: e.target.checked })} />
-        <span>
-          Cache answers above temperature 0
-          <br />
-          <span className="small">Off by default, because those answers can vary.</span>
-        </span>
-      </label>
+      <div className="kform__options">
+        <Checkbox label="Use the semantic cache" hint="Returns saved answers for near-identical questions." checked={v.semanticCache}
+          onChange={(e) => setV({ ...v, semanticCache: e.target.checked })} />
+        <Checkbox label="Cache answers above temperature 0" hint="Off by default, because those answers can vary." checked={v.cacheNonzeroTemp}
+          onChange={(e) => setV({ ...v, cacheNonzeroTemp: e.target.checked })} />
+      </div>
       {error && (
         <div className="err" role="alert">
           <span>{error}</span>

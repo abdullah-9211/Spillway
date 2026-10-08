@@ -128,7 +128,7 @@ body {
 .btn:disabled { opacity: 0.55; cursor: not-allowed; }
 .theme-switch { align-self: flex-start; margin-left: 8px; }
 
-.lab { display: block; font-weight: 500; margin-bottom: 8px; }
+.lab { display: block; font-weight: 500; margin-bottom: 8px; white-space: nowrap; }
 .inp {
   width: 100%; min-height: 40px; border-radius: var(--r-button); border: 1px solid var(--line2);
   background: var(--panel); color: var(--text); font: inherit; padding: 8px 12px;
@@ -165,9 +165,9 @@ body {
 .sub { color: var(--mute); margin: 8px 0 0; }
 .cols { display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start; }
 .tbl { flex: 999 1 640px; min-width: 0; }
-.dr { flex: 1 1 340px; max-width: 384px; padding: 24px; display: flex; flex-direction: column; gap: 24px; position: sticky; top: 16px; align-self: flex-start; }
-.dr:focus { outline: none; }
-.scroll { overflow-x: auto; }
+.kcreate { padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+.kcreate:focus { outline: none; }
+.scroll { overflow-x: auto; container-type: inline-size; }
 .tbl { overflow: hidden; }
 .empty { padding: 32px 24px; margin: 0; color: var(--mute); }
 .ttl { font-family: var(--ff-title); font-size: var(--fs-ask); font-weight: var(--fw-title); margin: 0; letter-spacing: var(--ls-title); line-height: 1.2; }
@@ -202,10 +202,7 @@ body {
 .kform, .kreveal { display: flex; flex-direction: column; gap: 16px; }
 .kreveal { gap: 24px; }
 .kreveal__sub { margin: 8px 0 0; }
-.kform__two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .kform__actions { display: flex; gap: 12px; flex-wrap: wrap; }
-.chk { display: flex; gap: 12px; align-items: flex-start; }
-.chk input { margin-top: 4px; accent-color: var(--accent); }
 .field-err { margin: 0; color: var(--fail); font-size: 12px; }
 .inp[aria-invalid="true"] { border-color: var(--fail); }
 .keybox {
@@ -248,8 +245,64 @@ body {
 .kgroup .krow { border-bottom: 0; }
 .kgroup--open { background: var(--raised); box-shadow: inset 3px 0 0 var(--accent); }
 .kinline { border-top: 1px solid var(--line); min-width: 1000px; }
-.kinline__cell { position: sticky; left: 0; width: min(960px, calc(100vw - 96px)); padding: 24px; }
+.kinline__cell { position: sticky; left: 0; width: min(960px, 100cqw); padding: 24px; }
 .ttl--sm { font-size: 18px; margin-bottom: 16px; }
-.kform--inline { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px 24px; align-items: start; }
-.kform--inline .kform__actions, .kform--inline .err, .kform--inline .field-err { grid-column: 1 / -1; }
-.kreveal--inline { gap: 16px; max-width: 560px; }
+.kreveal--inline { gap: 8px; max-width: 560px; }
+.kreveal--inline .kform__actions { margin-top: 8px; }
+.kreveal--inline .ttl--sm, .kcreate .ttl--sm { margin-bottom: 0; }
+
+/* --- form layout: the same markup stacks in the side panel and spreads across a table row --- */
+.kform__fields { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+.kform__name { grid-column: 1 / -1; }
+.kform__options { display: flex; flex-direction: column; gap: 12px; }
+.kform--inline { gap: 24px; max-width: 920px; }
+.kform--inline .kform__fields { grid-template-columns: minmax(220px, 2fr) minmax(140px, 1fr) minmax(190px, 1fr); }
+.kform--inline .kform__name { grid-column: auto; }
+.kform--inline .kform__options { flex-direction: row; }
+.kform--inline .kform__options .cb { flex: 1 1 0; min-width: 0; }
+@media (max-width: 900px) {
+  .kform--inline .kform__fields { grid-template-columns: 1fr 1fr; }
+  .kform--inline .kform__name { grid-column: 1 / -1; }
+  .kform--inline .kform__options { flex-direction: column; }
+}
+.kinline { background: color-mix(in srgb, var(--accent) 3%, var(--raised)); }
+
+/* --- checkboxes: a custom-drawn box inside a selectable card --- */
+input[type="checkbox"] {
+  appearance: none; -webkit-appearance: none; flex: none; width: 18px; height: 18px; margin: 0;
+  border: 1.5px solid var(--subtle); border-radius: 5px; background: var(--bg); display: inline-grid; place-content: center;
+  cursor: pointer; transition: background-color 0.12s, border-color 0.12s;
+}
+input[type="checkbox"]::after {
+  content: ""; width: 9px; height: 5px; border-left: 2px solid var(--accent-ink); border-bottom: 2px solid var(--accent-ink);
+  transform: translateY(-1px) rotate(-45deg) scale(0); transition: transform 0.12s;
+}
+input[type="checkbox"]:checked { background: var(--accent); border-color: var(--accent); }
+input[type="checkbox"]:checked::after { transform: translateY(-1px) rotate(-45deg) scale(1); }
+input[type="checkbox"]:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.cb {
+  display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; cursor: pointer;
+  border: 1px solid var(--line2); border-radius: var(--r-button); background: var(--panel);
+  transition: border-color 0.12s, background-color 0.12s;
+}
+.cb:hover { border-color: var(--subtle); }
+.cb:has(input:checked) { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, var(--panel)); }
+.cb:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
+.cb input { margin-top: 2px; }
+.cb__text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cb__label { font-weight: 500; }
+.cb__hint { font-size: 12px; color: var(--mute); }
+
+/* --- selects: the browser's arrow is replaced so they match the inputs --- */
+select.inp {
+  appearance: none; -webkit-appearance: none; cursor: pointer; padding-right: 36px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--subtle) 50%), linear-gradient(135deg, var(--subtle) 50%, transparent 50%);
+  background-position: calc(100% - 18px) 55%, calc(100% - 13px) 55%; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat;
+}
+
+/* the one-time reveal: the key and its warning on the left, the settings on the right */
+.kreveal--wide { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 32px; align-items: start; }
+.kreveal__main, .kreveal__side { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
+@media (max-width: 900px) { .kreveal--wide { grid-template-columns: 1fr; gap: 24px; } }
+.kreveal--inline p { margin: 0; }

@@ -10,7 +10,9 @@ export function usd(amount: string | null | undefined): string {
   if (amount == null) return "";
   const n = Number(amount);
   if (!Number.isFinite(n)) return amount;
-  const places = n !== 0 && Math.abs(n) < 0.01 ? 4 : 2;
+  // Under a cent, keep enough places that a real amount never reads as $0.00 (down to a millionth of a dollar).
+  const abs = Math.abs(n);
+  const places = abs === 0 || abs >= 0.01 ? 2 : abs >= 0.00005 ? 4 : 6;
   return "$" + n.toLocaleString("en-US", { minimumFractionDigits: places, maximumFractionDigits: places });
 }
 

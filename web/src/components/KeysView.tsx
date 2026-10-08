@@ -82,7 +82,11 @@ export function KeysView({ keys }: { keys: ApiKey[] }) {
   // The in-place editor scrolls just enough to be seen, so the key being changed stays where it was.
   const inlineId = inline ? `${inline.kind}:${inline.key.id}` : "";
   useEffect(() => {
-    if (inlineId) inlineRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    if (!inlineId) return;
+    // On a narrow screen the table scrolls sideways; start from the left so the key's name is beside its editor.
+    const scroller = inlineRef.current?.closest<HTMLElement>(".scroll");
+    if (scroller) scroller.scrollLeft = 0;
+    inlineRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }, [inlineId]);
 
   async function run<T>(fn: () => Promise<T>): Promise<T | null> {
@@ -148,6 +152,20 @@ export function KeysView({ keys }: { keys: ApiKey[] }) {
           </svg>
           <span>You are signed in as a viewer. You can see limits and spend, but only an admin can create, change or revoke keys. Full key values are never shown.</span>
         </div>
+      )}
+
+      {isAdmin && panel.kind !== "none" && (
+        <section className="panel kcreate" aria-label="Key details" ref={panelRef} tabIndex={-1}>
+          {panel.kind === "create" && (
+            <>
+              <h2 className="ttl ttl--sm">New key</h2>
+              <KeyForm layout="inline" submitLabel="Create key" pending={pending} error={error} onSubmit={create} onCancel={() => open({ kind: "none" })} />
+            </>
+          )}
+          {panel.kind === "created" && (
+            <KeyReveal keyInfo={panel.key} secret={panel.secret} onDone={() => open({ kind: "none" })} onAnother={() => open({ kind: "create" })} />
+          )}
+        </section>
       )}
 
       <div className="cols">
@@ -237,19 +255,6 @@ export function KeysView({ keys }: { keys: ApiKey[] }) {
           )}
         </section>
 
-        {isAdmin && panel.kind !== "none" && (
-          <aside className="panel dr" aria-label="Key details" ref={panelRef} tabIndex={-1}>
-            {panel.kind === "create" && (
-              <>
-                <h2 className="ttl">New key</h2>
-                <KeyForm submitLabel="Create key" pending={pending} error={error} onSubmit={create} onCancel={() => open({ kind: "none" })} />
-              </>
-            )}
-            {panel.kind === "created" && (
-              <KeyReveal keyInfo={panel.key} secret={panel.secret} onDone={() => open({ kind: "none" })} onAnother={() => open({ kind: "create" })} />
-            )}
-          </aside>
-        )}
       </div>
     </>
   );

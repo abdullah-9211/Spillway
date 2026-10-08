@@ -122,7 +122,7 @@ describe("KeysView as a viewer", () => {
     expect(screen.getByText(/signed in as a viewer/i)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^(Edit|Revoke) / })).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "Create key" }));
-    expect(screen.queryByRole("complementary")).toBeNull();
+    expect(screen.queryByRole("region", { name: "Key details" })).toBeNull();
   });
 
   it("has no accessibility violations", async () => {
@@ -138,7 +138,7 @@ describe("KeysView as an admin", () => {
     withRole("admin", <KeysView keys={states} />);
 
     await userEvent.click(screen.getByRole("button", { name: "Create key" }));
-    const panel = screen.getByRole("complementary", { name: "Key details" });
+    const panel = screen.getByRole("region", { name: "Key details" });
     await userEvent.type(within(panel).getByLabelText("Name"), "ci-pipeline");
     await userEvent.type(within(panel).getByLabelText("Requests a minute"), "60");
     await userEvent.type(within(panel).getByLabelText("Monthly budget (USD)"), "30");
@@ -163,7 +163,7 @@ describe("KeysView as an admin", () => {
     withRole("admin", <KeysView keys={[]} />);
     await userEvent.click(screen.getByRole("button", { name: "Create key" }));
     await userEvent.type(screen.getByLabelText("Name"), "k");
-    await userEvent.click(within(screen.getByRole("complementary")).getByRole("button", { name: "Create key" }));
+    await userEvent.click(within(screen.getByRole("region", { name: "Key details" })).getByRole("button", { name: "Create key" }));
     await userEvent.click(await screen.findByRole("button", { name: "Copy key" }));
     expect(writeText).toHaveBeenCalledWith("spw_COPYME");
     expect(await screen.findByText("Copied to the clipboard.")).toBeInTheDocument();
@@ -175,7 +175,7 @@ describe("KeysView as an admin", () => {
     await userEvent.click(screen.getByRole("button", { name: "Create key" }));
     await userEvent.type(screen.getByLabelText("Requests a minute"), "0");
     await userEvent.type(screen.getByLabelText("Monthly budget (USD)"), "lots");
-    await userEvent.click(within(screen.getByRole("complementary")).getByRole("button", { name: "Create key" }));
+    await userEvent.click(within(screen.getByRole("region", { name: "Key details" })).getByRole("button", { name: "Create key" }));
     expect(screen.getByText("Give the key a name.")).toBeInTheDocument();
     expect(screen.getByText(/whole number from 1/)).toBeInTheDocument();
     expect(screen.getByText(/dollars such as 30/)).toBeInTheDocument();
@@ -188,7 +188,7 @@ describe("KeysView as an admin", () => {
     withRole("admin", <KeysView keys={[]} />);
     await userEvent.click(screen.getByRole("button", { name: "Create key" }));
     await userEvent.type(screen.getByLabelText("Name"), "dup");
-    await userEvent.click(within(screen.getByRole("complementary")).getByRole("button", { name: "Create key" }));
+    await userEvent.click(within(screen.getByRole("region", { name: "Key details" })).getByRole("button", { name: "Create key" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("The name is taken.");
     expect(screen.getByLabelText("Name")).toHaveValue("dup");
   });
@@ -199,7 +199,7 @@ describe("KeysView as an admin", () => {
     withRole("admin", <KeysView keys={list} />);
     await userEvent.click(screen.getByRole("button", { name: "Edit second" }));
 
-    expect(screen.queryByRole("complementary")).toBeNull(); // no side panel for edits
+    expect(screen.queryByRole("region", { name: "Key details" })).toBeNull(); // edits happen in the row, not in the create card
     const rows = screen.getAllByRole("row").map((r) => r.textContent ?? "");
     const at = rows.findIndex((t) => t.startsWith("second"));
     expect(rows[at + 1]).toContain("Save changes"); // the editor is the very next row
