@@ -76,9 +76,14 @@ for (const [label, who, role] of [["admin", admin, "admin"], ["viewer", viewer, 
 
   const usagePage = await fetch(base + "/usage", { headers: { cookie } });
   const usageHtml = await usagePage.text();
-  check(`${label} can open Usage and cost`, usagePage.status === 200 && usageHtml.includes("Usage and cost") && usageHtml.includes("Spend per day") && usageHtml.includes("By model") && usageHtml.includes("Provider health"), `status ${usagePage.status}`);
+  check(`${label} can open Usage and cost`, usagePage.status === 200 && usageHtml.includes("Usage and cost") && usageHtml.includes("Usage over time") && usageHtml.includes("By model") && usageHtml.includes("Provider health"), `status ${usagePage.status}`);
   const week = await fetch(base + "/usage?range=7d", { headers: { cookie } });
   check(`${label} can switch the range`, week.status === 200 && (await week.text()).includes('aria-current="true"'));
+  const custom = await fetch(base + "/usage?range=custom&from=2020-01-01&to=2020-01-31", { headers: { cookie } });
+  const customHtml = await custom.text();
+  check(`${label} can choose a custom range`, custom.status === 200 && customHtml.includes("Custom range") && customHtml.includes("2020-01-01"), `status ${custom.status}`);
+  const badCustom = await fetch(base + "/usage?range=custom&from=2026-10-09&to=2026-10-01", { headers: { cookie } });
+  check(`${label} sees a clear message for a backwards custom range`, badCustom.status === 200 && (await badCustom.text()).includes("The first day is after the last day"), `status ${badCustom.status}`);
   const csv = await fetch(base + "/api/usage/export?from=2020-01-01&to=2020-01-31", { headers: { cookie } });
   const csvText = await csv.text();
   check(`${label} can export a CSV`, csv.status === 200 && (csv.headers.get("content-type") ?? "").includes("text/csv") && csvText.startsWith("day,key,model,requests"), `status ${csv.status}: ${csvText.slice(0, 60)}`);

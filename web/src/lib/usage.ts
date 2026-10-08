@@ -7,15 +7,47 @@ export type CacheSplit = components["schemas"]["CacheSplit"];
 
 // --- the date range ---
 
-export type Preset = "7d" | "14d" | "month";
+export type Preset = "7d" | "14d" | "30d" | "90d" | "month" | "last-month" | "180d" | "365d" | "custom";
+
+/** The ranges shown as buttons. */
 export const PRESETS: { value: Preset; label: string }[] = [
   { value: "7d", label: "7 days" },
   { value: "14d", label: "14 days" },
-  { value: "month", label: "This month" },
+  { value: "30d", label: "30 days" },
+  { value: "90d", label: "90 days" },
 ];
 
+/** Ranges in the "more" menu. Custom opens a pair of date fields. */
+export const MORE_PRESETS: { value: Preset; label: string }[] = [
+  { value: "month", label: "This month" },
+  { value: "last-month", label: "Last month" },
+  { value: "180d", label: "Last 6 months" },
+  { value: "365d", label: "Last 12 months" },
+  { value: "custom", label: "Custom range…" },
+];
+
+const ALL: Preset[] = ["7d", "14d", "30d", "90d", "month", "last-month", "180d", "365d", "custom"];
+
 export function parsePreset(v: string | undefined): Preset {
-  return v === "7d" || v === "month" ? v : "14d";
+  return ALL.includes(v as Preset) ? (v as Preset) : "14d";
+}
+
+export const MAX_RANGE_DAYS = 366;
+const DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** A custom range from the URL, or an explanation of what is wrong with it. */
+export function parseCustom(from: string | undefined, to: string | undefined, now: Date = new Date()): { from: string; to: string } | { error: string } {
+  // Date.parse accepts 2026-02-30 and rolls it into March, so check that the date survives a round trip.
+  const real = (d: string) => DATE.test(d) && new Date(`${d}T00:00:00Z`).toISOString().slice(0, 10) === d;
+  if (!from || !to || !real(from) || !real(to)) {
+    return { error: "Choose a first and a last day." };
+  }
+  if (from > to) return { error: "The first day is after the last day." };
+  const today = iso(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())));
+  if (to > today) return { error: "The last day cannot be in the future." };
+  const days = Math.round((Date.parse(to) - Date.parse(from)) / 86_400_000) + 1;
+  if (days > MAX_RANGE_DAYS) return { error: `Choose at most ${MAX_RANGE_DAYS} days at a time.` };
+  return { from, to };
 }
 
 const iso = (d: Date) => d.toISOString().slice(0, 10);
@@ -27,8 +59,21 @@ export function rangeFor(preset: Preset, now: Date = new Date()): { from: string
   switch (preset) {
     case "7d":
       return { from: back(6), to: iso(today) };
+    case "30d":
+      return { from: back(29), to: iso(today) };
+    case "90d":
+      return { from: back(89), to: iso(today) };
+    case "180d":
+      return { from: back(179), to: iso(today) };
+    case "365d":
+      return { from: back(364), to: iso(today) };
     case "month":
       return { from: iso(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1))), to: iso(today) };
+    case "last-month": {
+      const first = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() - 1, 1));
+      const last = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 0));
+      return { from: iso(first), to: iso(last) };
+    }
     default:
       return { from: back(13), to: iso(today) };
   }
@@ -98,82 +143,15 @@ export function shares(values: number[]): number[] {
   return floor;
 }
 
-// --- the spend-per-day chart ---
-
-export type Series = { model: string; color: string; label: string };
+// --- colours shared by the chart and the table ---
 
 const COLORS = ["var(--s1)", "var(--s2)", "var(--s3)"];
-export const OTHER = "other";
 
-/**
- * Chooses what the chart draws: the two models that cost most get their own colours, everything else paid is
- * grouped as "other", and models that cost nothing are named in the legend but have no bar.
- */
-export function chartSeries(days: UsageGroup[], byModel: UsageGroup[]): { series: Series[]; free: string[]; colorOf: (m: string) => string } {
+/** The two models that cost most get their own colour; everything else is grey. Same rule the chart uses for spend. */
+export function modelColors(byModel: UsageGroup[]): (model: string) => string {
   const paid = byModel.filter((m) => microsOf(m.cost_usd) > 0n).sort((a, b) => (microsOf(b.cost_usd) > microsOf(a.cost_usd) ? 1 : -1));
-  const free = byModel.filter((m) => microsOf(m.cost_usd) === 0n && m.requests > 0 && m.key !== "").map((m) => m.label);
-  const named = paid.slice(0, 2);
-  const series: Series[] = named.map((m, i) => ({ model: m.key, color: COLORS[i], label: m.label }));
-  if (paid.length > 2) series.push({ model: OTHER, color: COLORS[2], label: "other models" });
-  // A model that shows up on a day but not in the by-model list still has to be drawn, so it joins "other".
-  const named_ = new Set(named.map((m) => m.key));
-  const stray = days.some((d) => Object.entries(d.models ?? {}).some(([m, c]) => !named_.has(m) && microsOf(c) > 0n));
-  if (stray && !series.some((x) => x.model === OTHER)) series.push({ model: OTHER, color: COLORS[2], label: "other models" });
-  const colorOf = (m: string) => series.find((s) => s.model === m)?.color ?? COLORS[2];
-  return { series, free, colorOf };
-}
-
-export type Bar = { day: string; label: string; total: string; segments: { model: string; color: string; cost: string; height: number }[]; tip: string; height: number };
-
-const STEPS = [1, 2, 2.5, 5, 10];
-
-/** The smallest "round" ceiling (1, 2, 2.5, 5 times a power of ten) at or above v, for a tidy y axis. */
-export function niceCeil(v: number): number {
-  if (v <= 0) return 1;
-  const p = Math.pow(10, Math.floor(Math.log10(v)));
-  return (STEPS.find((s) => s * p >= v - 1e-12) ?? 10) * p;
-}
-
-export function tickLabel(v: number, top: number): string {
-  if (v === 0) return "$0";
-  if (top >= 4) return `$${Math.round(v)}`;
-  if (top >= 0.4) return `$${v.toFixed(2)}`;
-  return `$${v.toFixed(4)}`.replace(/0+$/, "").replace(/\.$/, ".0");
-}
-
-export function buildBars(days: UsageGroup[], series: Series[]): { bars: Bar[]; top: number; ticks: string[] } {
-  const totals = days.map((d) => Number(d.cost_usd));
-  const top = niceCeil(Math.max(0, ...totals));
-  const bars = days.map((d) => {
-    const parts = new Map<string, bigint>();
-    for (const [m, c] of Object.entries(d.models ?? {})) {
-      const key = series.some((s) => s.model === m) ? m : OTHER;
-      parts.set(key, (parts.get(key) ?? 0n) + microsOf(c));
-    }
-    const segments = series
-      .map((s) => ({ model: s.model, color: s.color, cost: dollarsOf(parts.get(s.model) ?? 0n) }))
-      .filter((s) => microsOf(s.cost) > 0n)
-      .map((s) => ({ ...s, height: (Number(s.cost) / top) * 100 }));
-    const dayNum = Number(d.key.slice(8, 10));
-    const monthName = new Date(`${d.key}T00:00:00Z`).toLocaleDateString("en-US", { month: "short", timeZone: "UTC" });
-    const detail = series.map((s) => `${s.label} ${fmtUsd(parts.get(s.model) ?? 0n)}`).join(", ");
-    return {
-      day: d.key,
-      label: dayNum === 1 ? `${monthName} 1` : String(dayNum),
-      total: d.cost_usd,
-      segments,
-      height: (Number(d.cost_usd) / top) * 100,
-      tip: `${monthName} ${dayNum}: ${fmtUsd(microsOf(d.cost_usd))} spent${series.length ? ` (${detail})` : ""}, ${count(d.requests)} requests`,
-    };
-  });
-  const ticks = [4, 3, 2, 1, 0].map((i) => tickLabel((top * i) / 4, top));
-  return { bars, top, ticks };
-}
-
-function fmtUsd(m: bigint): string {
-  const n = Number(m) / 1e6;
-  const places = n === 0 || n >= 0.01 ? 2 : n >= 0.00005 ? 4 : 6;
-  return "$" + n.toLocaleString("en-US", { minimumFractionDigits: places, maximumFractionDigits: places });
+  const named = new Map(paid.slice(0, 2).map((m, i) => [m.key, COLORS[i]]));
+  return (m) => named.get(m) ?? COLORS[2];
 }
 
 // --- provider health pills ---

@@ -89,9 +89,19 @@ type Group struct {
 	Key   string // the day (2026-10-08), the model id, or the key id
 	Label string
 	Metrics
-	TimedRequests int64                   // requests the latency figures are based on (successful, not served from a cache)
-	P50Ms, P95Ms  float64                 // model groups only
-	Models        map[string]money.Micros // day groups only: that day's cost per model
+	TimedRequests int64                 // requests the latency figures are based on (successful, not served from a cache)
+	P50Ms, P95Ms  float64               // model groups only
+	Series        map[string]SeriesStat // day groups only: that day split by model or by key
+}
+
+// SeriesStat is one slice of a day: what one model (or one key) did that day.
+type SeriesStat struct {
+	Label        string
+	Requests     int64
+	InputTokens  int64
+	OutputTokens int64
+	Cost         money.Micros
+	Saved        money.Micros
 }
 
 type ProviderAttempts struct {
@@ -103,6 +113,7 @@ type ProviderAttempts struct {
 type Summary struct {
 	Range     Range
 	GroupBy   string
+	Stack     string // for day groups: what each day is split by, model or key
 	Totals    Totals
 	Groups    []Group
 	Providers []ProviderAttempts
@@ -113,7 +124,10 @@ type Reader struct{ q *sqlcgen.Queries }
 
 func NewReader(pool *pgxpool.Pool) *Reader { return &Reader{q: sqlcgen.New(pool)} }
 
-var ErrBadGroup = errors.New("group_by must be day, model or key")
+var (
+	ErrBadGroup = errors.New("group_by must be day, model or key")
+	ErrBadStack = errors.New("stack must be model or key")
+)
 
 func nullKey(id *uuid.UUID) uuid.NullUUID {
 	if id == nil {
@@ -125,14 +139,22 @@ func nullKey(id *uuid.UUID) uuid.NullUUID {
 func micros(n pgtype.Numeric) (money.Micros, error) { return db.MicrosFromNumeric(n) }
 
 // Summary builds the report for a range, optionally for one key, grouped by day, model or key.
-func (r *Reader) Summary(ctx context.Context, rng Range, keyID *uuid.UUID, groupBy string) (*Summary, error) {
+//
+// For day groups, stack says how each day is split: by model (the default) or by API key.
+func (r *Reader) Summary(ctx context.Context, rng Range, keyID *uuid.UUID, groupBy, stack string) (*Summary, error) {
 	if groupBy == "" {
 		groupBy = "day"
+	}
+	if stack == "" {
+		stack = "model"
+	}
+	if stack != "model" && stack != "key" {
+		return nil, ErrBadStack
 	}
 	if groupBy != "day" && groupBy != "model" && groupBy != "key" {
 		return nil, ErrBadGroup
 	}
-	out := &Summary{Range: rng, GroupBy: groupBy}
+	out := &Summary{Range: rng, GroupBy: groupBy, Stack: stack}
 	key := nullKey(keyID)
 
 	t, err := r.q.ReportTotals(ctx, sqlcgen.ReportTotalsParams{FromTs: rng.From, ToTs: rng.To, KeyID: key})
@@ -156,37 +178,77 @@ func (r *Reader) Summary(ctx context.Context, rng Range, keyID *uuid.UUID, group
 
 	switch groupBy {
 	case "day":
-		rows, err := r.q.ReportByDayModel(ctx, sqlcgen.ReportByDayModelParams{FromTs: rng.From, ToTs: rng.To, KeyID: key})
-		if err != nil {
-			return nil, fmt.Errorf("report by day: %w", err)
+		type slice struct {
+			day, series, label                 string
+			requests, in, out, cacheHits, errs int64
+			cost, saved                        money.Micros
+		}
+		var slices []slice
+		if stack == "key" {
+			rows, err := r.q.ReportByDayKey(ctx, sqlcgen.ReportByDayKeyParams{FromTs: rng.From, ToTs: rng.To, KeyID: key})
+			if err != nil {
+				return nil, fmt.Errorf("report by day and key: %w", err)
+			}
+			for _, row := range rows {
+				c, err := micros(row.CostUsd)
+				if err != nil {
+					return nil, err
+				}
+				sv, err := micros(row.SavedUsd)
+				if err != nil {
+					return nil, err
+				}
+				id := ""
+				if row.KeyID.Valid {
+					id = row.KeyID.UUID.String()
+				}
+				slices = append(slices, slice{day: row.Day.Time.UTC().Format(dateLayout), series: id, label: row.KeyName, requests: row.Requests,
+					in: row.InputTokens, out: row.OutputTokens, cost: c, saved: sv, cacheHits: row.CacheHits, errs: row.Errors})
+			}
+		} else {
+			rows, err := r.q.ReportByDayModel(ctx, sqlcgen.ReportByDayModelParams{FromTs: rng.From, ToTs: rng.To, KeyID: key})
+			if err != nil {
+				return nil, fmt.Errorf("report by day: %w", err)
+			}
+			for _, row := range rows {
+				c, err := micros(row.CostUsd)
+				if err != nil {
+					return nil, err
+				}
+				sv, err := micros(row.SavedUsd)
+				if err != nil {
+					return nil, err
+				}
+				slices = append(slices, slice{day: row.Day.Time.UTC().Format(dateLayout), series: row.Model, label: row.Model, requests: row.Requests,
+					in: row.InputTokens, out: row.OutputTokens, cost: c, saved: sv, cacheHits: row.CacheHits, errs: row.Errors})
+			}
 		}
 		byDay := map[string]*Group{}
 		for d := rng.From; d.Before(rng.To); d = d.AddDate(0, 0, 1) { // every day in the range, even a quiet one
 			k := d.Format(dateLayout)
-			byDay[k] = &Group{Key: k, Label: k, Models: map[string]money.Micros{}}
+			byDay[k] = &Group{Key: k, Label: k, Series: map[string]SeriesStat{}}
 		}
-		for _, row := range rows {
-			g := byDay[row.Day.Time.UTC().Format(dateLayout)]
+		for _, sl := range slices {
+			g := byDay[sl.day]
 			if g == nil {
 				continue
 			}
-			c, err := micros(row.CostUsd)
-			if err != nil {
-				return nil, err
-			}
-			s, err := micros(row.SavedUsd)
-			if err != nil {
-				return nil, err
-			}
-			g.Requests += row.Requests
-			g.InputTokens += row.InputTokens
-			g.OutputTokens += row.OutputTokens
-			g.Cost += c
-			g.Saved += s
-			g.CacheHits += row.CacheHits
-			g.Errors += row.Errors
-			if row.Model != "" {
-				g.Models[row.Model] += c
+			g.Requests += sl.requests
+			g.InputTokens += sl.in
+			g.OutputTokens += sl.out
+			g.Cost += sl.cost
+			g.Saved += sl.saved
+			g.CacheHits += sl.cacheHits
+			g.Errors += sl.errs
+			if sl.series != "" || stack == "key" { // requests refused before routing have no model, but their key is known
+				st := g.Series[sl.series]
+				st.Label = sl.label
+				st.Requests += sl.requests
+				st.InputTokens += sl.in
+				st.OutputTokens += sl.out
+				st.Cost += sl.cost
+				st.Saved += sl.saved
+				g.Series[sl.series] = st
 			}
 		}
 		for d := rng.From; d.Before(rng.To); d = d.AddDate(0, 0, 1) {
@@ -412,12 +474,12 @@ func (r *Reader) WriteCSV(ctx context.Context, w io.Writer, rng Range, keyID *uu
 	return cw.Error()
 }
 
-// SortedModels returns model ids ordered by total cost, highest first, for stable chart series.
+// SortedModels returns series ids ordered by total cost, highest first, for stable chart series.
 func SortedModels(days []Group) []string {
 	total := map[string]money.Micros{}
 	for _, d := range days {
-		for m, c := range d.Models {
-			total[m] += c
+		for m, st := range d.Series {
+			total[m] += st.Cost
 		}
 	}
 	names := make([]string, 0, len(total))

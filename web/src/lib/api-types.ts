@@ -284,10 +284,22 @@ export interface components {
             p50_ms: number | null;
             /** @description Model groups only */
             p95_ms: number | null;
-            /** @description Day groups only: that day's cost per model */
-            models?: {
-                [key: string]: string;
+            /** @description Day groups only: that day split by model or by key (see `stack`), keyed by model id or key id */
+            series?: {
+                [key: string]: components["schemas"]["SeriesStat"];
             };
+        };
+        SeriesStat: {
+            /** @description The model id, or the key's name */
+            label: string;
+            /** Format: int64 */
+            requests: number;
+            /** Format: int64 */
+            input_tokens: number;
+            /** Format: int64 */
+            output_tokens: number;
+            cost_usd: string;
+            saved_usd: string;
         };
         ProviderHealth: {
             name: string;
@@ -320,6 +332,8 @@ export interface components {
             };
             /** @enum {string} */
             group_by: "day" | "model" | "key";
+            /** @enum {string} */
+            stack: "model" | "key";
             totals: components["schemas"]["UsageTotals"];
             added_latency: components["schemas"]["AddedLatency"] | null;
             providers: components["schemas"]["ProviderHealth"][];
@@ -659,6 +673,8 @@ export interface operations {
                 /** @description Only this key */
                 key_id?: components["parameters"]["KeyId"];
                 group_by?: "day" | "model" | "key";
+                /** @description With group_by=day, what each day is split by */
+                stack?: "model" | "key";
             };
             header?: never;
             path?: never;

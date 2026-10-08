@@ -13,6 +13,75 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const reportByDayKey = `-- name: ReportByDayKey :many
+SELECT
+  (u.created_at AT TIME ZONE 'UTC')::date              AS day,
+  u.api_key_id                                         AS key_id,
+  COALESCE(k.name, '(deleted key)')::text              AS key_name,
+  count(*)::bigint                                     AS requests,
+  COALESCE(sum(u.input_tokens), 0)::bigint             AS input_tokens,
+  COALESCE(sum(u.output_tokens), 0)::bigint            AS output_tokens,
+  COALESCE(sum(u.cost_usd), 0)::numeric                AS cost_usd,
+  COALESCE(sum(u.saved_usd), 0)::numeric               AS saved_usd,
+  count(*) FILTER (WHERE u.cache_status IN ('hit_exact', 'hit_semantic'))::bigint AS cache_hits,
+  count(*) FILTER (WHERE u.outcome IN ('upstream_error', 'all_providers_failed'))::bigint AS errors
+FROM usage u LEFT JOIN api_keys k ON k.id = u.api_key_id
+WHERE u.created_at >= $1 AND u.created_at < $2
+  AND ($3::uuid IS NULL OR u.api_key_id = $3::uuid)
+GROUP BY 1, 2, 3
+ORDER BY 1, 2
+`
+
+type ReportByDayKeyParams struct {
+	FromTs time.Time
+	ToTs   time.Time
+	KeyID  uuid.NullUUID
+}
+
+type ReportByDayKeyRow struct {
+	Day          pgtype.Date
+	KeyID        uuid.NullUUID
+	KeyName      string
+	Requests     int64
+	InputTokens  int64
+	OutputTokens int64
+	CostUsd      pgtype.Numeric
+	SavedUsd     pgtype.Numeric
+	CacheHits    int64
+	Errors       int64
+}
+
+func (q *Queries) ReportByDayKey(ctx context.Context, arg ReportByDayKeyParams) ([]ReportByDayKeyRow, error) {
+	rows, err := q.db.Query(ctx, reportByDayKey, arg.FromTs, arg.ToTs, arg.KeyID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ReportByDayKeyRow
+	for rows.Next() {
+		var i ReportByDayKeyRow
+		if err := rows.Scan(
+			&i.Day,
+			&i.KeyID,
+			&i.KeyName,
+			&i.Requests,
+			&i.InputTokens,
+			&i.OutputTokens,
+			&i.CostUsd,
+			&i.SavedUsd,
+			&i.CacheHits,
+			&i.Errors,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const reportByDayModel = `-- name: ReportByDayModel :many
 SELECT
   (created_at AT TIME ZONE 'UTC')::date                AS day,

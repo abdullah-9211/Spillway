@@ -6,8 +6,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-
-	"github.com/abdullah-9211/spillway/internal/money"
 )
 
 func day(y int, m time.Month, d int) time.Time { return time.Date(y, m, d, 0, 0, 0, 0, time.UTC) }
@@ -91,8 +89,8 @@ func TestSafeCellStopsFormulaInjection(t *testing.T) {
 
 func TestSortedModelsOrdersByCost(t *testing.T) {
 	days := []Group{
-		{Models: map[string]money.Micros{"mini": 2, "sonnet": 5}},
-		{Models: map[string]money.Micros{"mini": 4, "local": 0, "alpha": 0}},
+		{Series: map[string]SeriesStat{"mini": {Cost: 2}, "sonnet": {Cost: 5}}},
+		{Series: map[string]SeriesStat{"mini": {Cost: 4}, "local": {}, "alpha": {}}},
 	}
 	got := SortedModels(days)
 	want := []string{"mini", "sonnet", "alpha", "local"} // mini 2+4=6 beats sonnet 5 // ties broken by name, so the chart colours never swap

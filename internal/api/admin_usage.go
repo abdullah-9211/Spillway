@@ -18,7 +18,7 @@ import (
 
 // UsageAdmin is what the usage endpoints need from the reports.
 type UsageAdmin interface {
-	Summary(ctx context.Context, rng usage.Range, keyID *uuid.UUID, groupBy string) (*usage.Summary, error)
+	Summary(ctx context.Context, rng usage.Range, keyID *uuid.UUID, groupBy, stack string) (*usage.Summary, error)
 	Requests(ctx context.Context, f usage.RequestFilter) ([]usage.RequestRow, string, error)
 	WriteCSV(ctx context.Context, w io.Writer, rng usage.Range, keyID *uuid.UUID) error
 }
@@ -57,19 +57,29 @@ type totalsBody struct {
 }
 
 type groupBody struct {
-	Key           string            `json:"key"`
-	Label         string            `json:"label"`
-	Requests      int64             `json:"requests"`
-	InputTokens   int64             `json:"input_tokens"`
-	OutputTokens  int64             `json:"output_tokens"`
-	CostUSD       string            `json:"cost_usd"`
-	SavedUSD      string            `json:"saved_usd"`
-	CacheHits     int64             `json:"cache_hits"`
-	Errors        int64             `json:"errors"`
-	TimedRequests int64             `json:"timed_requests"`
-	P50Ms         *float64          `json:"p50_ms"`
-	P95Ms         *float64          `json:"p95_ms"`
-	Models        map[string]string `json:"models,omitempty"`
+	Key           string                `json:"key"`
+	Label         string                `json:"label"`
+	Requests      int64                 `json:"requests"`
+	InputTokens   int64                 `json:"input_tokens"`
+	OutputTokens  int64                 `json:"output_tokens"`
+	CostUSD       string                `json:"cost_usd"`
+	SavedUSD      string                `json:"saved_usd"`
+	CacheHits     int64                 `json:"cache_hits"`
+	Errors        int64                 `json:"errors"`
+	TimedRequests int64                 `json:"timed_requests"`
+	P50Ms         *float64              `json:"p50_ms"`
+	P95Ms         *float64              `json:"p95_ms"`
+	Series        map[string]seriesBody `json:"series,omitempty"`
+}
+
+// seriesBody is one slice of a day: a model's or a key's share of it.
+type seriesBody struct {
+	Label        string `json:"label"`
+	Requests     int64  `json:"requests"`
+	InputTokens  int64  `json:"input_tokens"`
+	OutputTokens int64  `json:"output_tokens"`
+	CostUSD      string `json:"cost_usd"`
+	SavedUSD     string `json:"saved_usd"`
 }
 
 type providerBody struct {
@@ -96,6 +106,7 @@ type summaryBody struct {
 		Days int    `json:"days"`
 	} `json:"range"`
 	GroupBy        string         `json:"group_by"`
+	Stack          string         `json:"stack"`
 	Totals         totalsBody     `json:"totals"`
 	AddedLatency   *latencyBody   `json:"added_latency"`
 	Providers      []providerBody `json:"providers"`
@@ -135,8 +146,8 @@ func (a *Admin) usageSummary(w http.ResponseWriter, r *http.Request, _ auth.Clai
 	if !ok {
 		return
 	}
-	s, err := a.d.Usage.Summary(r.Context(), rng, key, q.Get("group_by"))
-	if errors.Is(err, usage.ErrBadGroup) {
+	s, err := a.d.Usage.Summary(r.Context(), rng, key, q.Get("group_by"), q.Get("stack"))
+	if errors.Is(err, usage.ErrBadGroup) || errors.Is(err, usage.ErrBadStack) {
 		writeAdminError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
@@ -148,7 +159,7 @@ func (a *Admin) usageSummary(w http.ResponseWriter, r *http.Request, _ auth.Clai
 
 	var out summaryBody
 	out.Range.From, out.Range.To, out.Range.Days = rng.From.Format("2006-01-02"), rng.To.AddDate(0, 0, -1).Format("2006-01-02"), rng.Days()
-	out.GroupBy = s.GroupBy
+	out.GroupBy, out.Stack = s.GroupBy, s.Stack
 	t := s.Totals
 	out.Totals = totalsBody{Requests: t.Requests, InputTokens: t.InputTokens, OutputTokens: t.OutputTokens, CostUSD: usd(t.Cost), SavedUSD: usd(t.Saved),
 		SavedShare: ratio(t.Saved, t.Cost), CacheHits: t.CacheHits, Errors: t.Errors, Rejected: t.Rejected,
@@ -164,9 +175,10 @@ func (a *Admin) usageSummary(w http.ResponseWriter, r *http.Request, _ auth.Clai
 			gb.P50Ms, gb.P95Ms = &p50, &p95
 		}
 		if s.GroupBy == "day" {
-			gb.Models = map[string]string{}
-			for m, c := range g.Models {
-				gb.Models[m] = usd(c)
+			gb.Series = map[string]seriesBody{}
+			for id, st := range g.Series {
+				gb.Series[id] = seriesBody{Label: st.Label, Requests: st.Requests, InputTokens: st.InputTokens, OutputTokens: st.OutputTokens,
+					CostUSD: usd(st.Cost), SavedUSD: usd(st.Saved)}
 			}
 		}
 		out.Groups = append(out.Groups, gb)

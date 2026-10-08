@@ -104,6 +104,8 @@ func TestResponsesMatchTheOpenAPISchema(t *testing.T) {
 		{"revoke unknown key", "DELETE", "/admin/keys/" + uuid.NewString(), admin, "", nil, 404},
 		{"revoke as viewer", "DELETE", "/admin/keys/" + keyID, viewer, "", nil, 403},
 		{"usage by day", "GET", "/admin/usage/summary?from=2026-10-01&to=2026-10-08", viewer, "", nil, 200},
+		{"usage by day stacked by key", "GET", "/admin/usage/summary?group_by=day&stack=key", viewer, "", nil, 200},
+		{"usage bad stack", "GET", "/admin/usage/summary?stack=colour", viewer, "", nil, 400},
 		{"usage by model", "GET", "/admin/usage/summary?group_by=model", viewer, "", nil, 200},
 		{"usage by key", "GET", "/admin/usage/summary?group_by=key&key_id=" + uuid.NewString(), viewer, "", nil, 200},
 		{"usage bad group", "GET", "/admin/usage/summary?group_by=planet", viewer, "", nil, 400},

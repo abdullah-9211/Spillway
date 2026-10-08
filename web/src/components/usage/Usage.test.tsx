@@ -1,12 +1,12 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { axe } from "vitest-axe";
-import { sumUsd, type UsageGroup, type UsageSummary } from "@/lib/usage";
+import type { UsageGroup, UsageSummary } from "@/lib/usage";
 import { CacheAndHealth } from "./CacheAndHealth";
 import { Kpis } from "./Kpis";
 import { ModelTable } from "./ModelTable";
-import { SpendChart } from "./SpendChart";
+import { UsageChart } from "./UsageChart";
 import { UsageControls } from "./UsageControls";
 
 const push = vi.fn();
@@ -33,11 +33,26 @@ const models = [
   grp({ key: "local", label: "local", requests: 7000, input_tokens: 2_600_000, output_tokens: 700_000, cost_usd: "0.000000", cache_hits: 980, errors: 14, timed_requests: 6000, p50_ms: 1400, p95_ms: 3600 }),
 ];
 
-const days: UsageGroup[] = ["2026-09-30", "2026-10-01", "2026-10-02"].map((d, i) =>
-  grp({ key: d, label: d, requests: 100 * (i + 1), cost_usd: ["9.200000", "10.800000", "0.000000"][i], models: i === 0 ? { sonnet: "7.100000", mini: "2.100000" } : i === 1 ? { sonnet: "8.400000", mini: "2.400000" } : {} }));
+const stat = (label: string, requests: number, cost: string, saved = "0.000000") => ({ label, requests, input_tokens: requests * 100, output_tokens: requests * 10, cost_usd: cost, saved_usd: saved });
+const mk = (key: string, series: Record<string, ReturnType<typeof stat>>, o: Partial<UsageGroup> = {}): UsageGroup => {
+  const v = Object.values(series);
+  const cost = v.reduce((a, x) => a + Number(x.cost_usd), 0).toFixed(6);
+  return grp({ key, label: key, requests: v.reduce((a, x) => a + x.requests, 0), input_tokens: v.reduce((a, x) => a + x.input_tokens, 0), output_tokens: v.reduce((a, x) => a + x.output_tokens, 0),
+    cost_usd: cost, saved_usd: v.reduce((a, x) => a + Number(x.saved_usd), 0).toFixed(6), series, ...o });
+};
+const days: UsageGroup[] = [
+  mk("2026-09-30", { sonnet: stat("sonnet", 60, "7.100000", "0.500000"), mini: stat("mini", 40, "2.100000"), local: stat("local", 20, "0.000000") }),
+  mk("2026-10-01", { sonnet: stat("sonnet", 120, "8.400000"), mini: stat("mini", 80, "2.400000"), local: stat("local", 10, "0.000000") }),
+  mk("2026-10-02", {}),
+];
+const daysByKey: UsageGroup[] = [
+  mk("2026-09-30", { k1: stat("support-agent", 100, "6.000000"), k2: stat("ci", 20, "3.200000") }),
+  mk("2026-10-01", { k1: stat("support-agent", 150, "10.800000") }),
+  mk("2026-10-02", {}),
+];
 
 const summary: UsageSummary = {
-  range: { from: "2026-09-30", to: "2026-10-02", days: 3 }, group_by: "model", fallbacks_fired: 212, added_latency: { p50_ms: 3.2, p95_ms: 14.1, p99_ms: 29, samples: 480, since: "2026-10-08T00:00:00Z" },
+  range: { from: "2026-09-30", to: "2026-10-02", days: 3 }, group_by: "model", stack: "model", fallbacks_fired: 212, added_latency: { p50_ms: 3.2, p95_ms: 14.1, p99_ms: 29, samples: 480, since: "2026-10-08T00:00:00Z" },
   totals: { requests: 48210, input_tokens: 47_900_000, output_tokens: 13_400_000, cost_usd: "186.420000", saved_usd: "41.070000", saved_share: 0.18, cache_hits: 11180, errors: 317, rejected: 4,
     cache: { miss: 28000, hit_exact: 12000, hit_semantic: 6000, bypass: 2210 } },
   providers: [
@@ -74,47 +89,172 @@ describe("Kpis", () => {
   });
 });
 
-describe("SpendChart", () => {
+describe("UsageChart", () => {
+  const renderChart = (keyId = "") => render(<UsageChart dayModel={days} dayKey={daysByKey} keyId={keyId} />);
+  const pressed = (name: string) => screen.getByRole("button", { name }).getAttribute("aria-pressed");
+  const bars = () => screen.getAllByRole("button").filter((b) => b.className.includes("col"));
+
   it("has a legend naming each series, including a free model that has no bar", () => {
-    render(<SpendChart days={days} byModel={models} />);
+    renderChart();
     const legend = document.querySelector(".legend") as HTMLElement;
-    expect(within(legend).getByText("sonnet")).toBeInTheDocument();
-    expect(within(legend).getByText("mini")).toBeInTheDocument();
+    expect(within(legend).getByRole("button", { name: "sonnet" })).toBeInTheDocument();
+    expect(within(legend).getByRole("button", { name: "mini" })).toBeInTheDocument();
     expect(within(legend).getByText("local (free, no bar)")).toBeInTheDocument();
   });
 
-  it("gives every bar a spoken figure and focus, so it is not hover-only", () => {
-    render(<SpendChart days={days} byModel={models} />);
-    const bars = screen.getAllByRole("img");
-    expect(bars).toHaveLength(3);
-    expect(bars[0]).toHaveAccessibleName(/Sep 30: \$9\.20 spent \(sonnet \$7\.10, mini \$2\.10\), 100 requests/);
-    expect(bars[0]).toHaveAttribute("tabindex", "0");
-    expect(bars[0]).toHaveAttribute("title");
+  it("gives every bar a spoken figure, and makes the chart reachable with the keyboard", () => {
+    renderChart();
+    expect(bars()).toHaveLength(3);
+    expect(bars()[0]).toHaveAccessibleName("Sep 30: $9.20 spent (sonnet $7.10, mini $2.10)");
+    // One tab stop for the whole chart, then the arrow keys.
+    expect(bars().filter((b) => b.getAttribute("tabindex") === "0")).toHaveLength(1);
   });
 
-  it("switches to a table whose totals equal the chart's", async () => {
-    render(<SpendChart days={days} byModel={models} />);
+  it("moves between bars with the arrow keys", async () => {
+    renderChart();
+    bars()[0].focus();
+    await userEvent.keyboard("{ArrowRight}");
+    expect(bars()[1]).toHaveFocus();
+    await userEvent.keyboard("{End}");
+    expect(bars()[2]).toHaveFocus();
+    await userEvent.keyboard("{ArrowRight}");
+    expect(bars()[2]).toHaveFocus();
+    await userEvent.keyboard("{Home}");
+    expect(bars()[0]).toHaveFocus();
+  });
+
+  it("shows a tooltip with the breakdown on hover and focus, and hides it after", async () => {
+    renderChart();
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    await userEvent.hover(bars()[0]);
+    const tip = screen.getByRole("tooltip");
+    expect(within(tip).getByText("Sep 30")).toBeInTheDocument();
+    expect(within(tip).getByText("$9.20")).toBeInTheDocument();
+    expect(within(tip).getByText("sonnet")).toBeInTheDocument();
+    expect(within(tip).getByText("$7.10")).toBeInTheDocument();
+    expect(within(tip).getByText("120 requests")).toBeInTheDocument();
+    await userEvent.unhover(bars()[0]);
+    fireEvent.mouseLeave(document.querySelector(".plot") as HTMLElement);
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  });
+
+  it("pins a bar's details on click, and the details link zooms to that day", async () => {
+    renderChart("");
+    await userEvent.click(bars()[1]);
+    expect(bars()[1]).toHaveAttribute("aria-pressed", "true");
+    const detail = screen.getByRole("region", { name: "Details for Oct 1" });
+    expect(within(detail).getByText("$10.80")).toBeInTheDocument(); // spend
+    expect(within(detail).getByText("210")).toBeInTheDocument(); // requests
+    const zoom = within(detail).getByRole("link", { name: "Open only this day" });
+    expect(zoom).toHaveAttribute("href", "/usage?range=custom&from=2026-10-01&to=2026-10-01");
+    await userEvent.click(within(detail).getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("region", { name: /Details for/ })).toBeNull();
+    await userEvent.click(bars()[1]);
+    await userEvent.click(bars()[1]);
+    expect(screen.queryByRole("region", { name: /Details for/ })).toBeNull(); // clicking again unpins
+  });
+
+  it("keeps the key filter in the zoom link", async () => {
+    renderChart("11111111-2222-3333-4444-555555555555");
+    await userEvent.click(bars()[0]);
+    expect(screen.getByRole("link", { name: "Open only this day" }).getAttribute("href")).toContain("key=11111111-2222-3333-4444-555555555555");
+  });
+
+  it("hides and shows a series from the legend, and the axis rescales", async () => {
+    renderChart();
+    const top = () => (document.querySelector(".yax span") as HTMLElement).textContent;
+    expect(top()).toBe("$20");
+    await userEvent.click(screen.getByRole("button", { name: "sonnet" }));
+    expect(pressed("sonnet")).toBe("false");
+    expect(top()).toBe("$2.50");
+    expect(bars()[0]).toHaveAccessibleName("Sep 30: $2.10 spent");
+    await userEvent.click(screen.getByRole("button", { name: "Show all" }));
+    expect(pressed("sonnet")).toBe("true");
+    expect(top()).toBe("$20");
+  });
+
+  it("says when every series is hidden", async () => {
+    renderChart();
+    await userEvent.click(screen.getByRole("button", { name: "sonnet" }));
+    await userEvent.click(screen.getByRole("button", { name: "mini" }));
+    expect(screen.getByText("Every series is hidden.")).toBeInTheDocument();
+  });
+
+  it("switches what is plotted", async () => {
+    renderChart();
+    await userEvent.click(screen.getByRole("button", { name: "Requests" }));
+    expect(pressed("Requests")).toBe("true");
+    expect(bars()[0]).toHaveAccessibleName(/^Sep 30: 120 requests \(sonnet 60, mini 40, other models 20\)/);
+    await userEvent.click(screen.getByRole("button", { name: "Tokens" }));
+    expect(bars()[1]).toHaveAccessibleName(/^Oct 1: 23\.1K tokens/);
+    await userEvent.click(screen.getByRole("button", { name: "Saved by cache" }));
+    expect(bars()[0]).toHaveAccessibleName("Sep 30: $0.50 saved by cache");
+    expect(screen.getByRole("button", { name: "Saved by cache" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("clears hidden series and the pinned bar when what is plotted changes", async () => {
+    renderChart();
+    await userEvent.click(screen.getByRole("button", { name: "sonnet" }));
+    await userEvent.click(bars()[0]);
+    await userEvent.click(screen.getByRole("button", { name: "Requests" }));
+    expect(screen.queryByRole("region", { name: /Details for/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Show all" })).toBeNull();
+  });
+
+  it("splits by API key instead of by model", async () => {
+    renderChart();
+    await userEvent.click(screen.getByRole("button", { name: "By key" }));
+    expect(pressed("By key")).toBe("true");
+    const legend = document.querySelector(".legend") as HTMLElement;
+    expect(within(legend).getByRole("button", { name: "support-agent" })).toBeInTheDocument();
+    expect(within(legend).getByRole("button", { name: "ci" })).toBeInTheDocument();
+    expect(bars()[0]).toHaveAccessibleName("Sep 30: $9.20 spent (support-agent $6.00, ci $3.20)");
+  });
+
+  it("cannot split by key when already filtered to one key", () => {
+    renderChart("some-key");
+    expect(screen.getByRole("button", { name: "By key" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "By model" })).toBeDisabled();
+  });
+
+  it("groups into weeks, and is only offered when there is enough to group", async () => {
+    const { unmount } = renderChart();
+    expect(screen.getByRole("button", { name: "Weekly" })).toBeDisabled(); // 3 days
+    unmount();
+    const long = Array.from({ length: 20 }, (_, i) => mk(`2026-09-${String(10 + i).padStart(2, "0")}`.replace("2026-09-3", "2026-09-3"), { sonnet: stat("sonnet", 10, "1.000000") }));
+    const valid = long.filter((d) => Number(d.key.slice(8)) <= 30);
+    render(<UsageChart dayModel={valid} dayKey={valid} keyId="" />);
+    expect(bars()).toHaveLength(valid.length);
+    await userEvent.click(screen.getByRole("button", { name: "Weekly" }));
+    expect(bars().length).toBeLessThan(valid.length);
+    expect(bars()[0].getAttribute("aria-label")).toMatch(/^Sep 10 to Sep 13: \$4\.00 spent/);
+  });
+
+  it("switches to a table whose totals match the figures", async () => {
+    renderChart();
     await userEvent.click(screen.getByRole("button", { name: "View as table" }));
-    const table = screen.getByRole("table", { name: "Spend per day by model" });
+    const table = screen.getByRole("table");
     const rows = within(table).getAllByRole("row");
-    expect(rows).toHaveLength(1 + 3 + 1); // header, three days, total
+    expect(rows).toHaveLength(1 + 3 + 1);
     const total = within(rows[rows.length - 1]).getAllByRole("cell").map((c) => c.textContent);
-    expect(within(rows[rows.length - 1]).getByRole("rowheader")).toHaveTextContent("Total");
-    const expected = sumUsd(days.map((d) => d.cost_usd)); // 20.000000
-    expect(total).toContain("$20.00");
-    expect(expected).toBe("20.000000");
-    expect(screen.getByRole("button", { name: "View as chart" })).toHaveAttribute("aria-pressed", "true");
+    expect(total).toEqual(["$15.50", "$4.50", "$20.00", "330"]); // sonnet, mini, total, requests
+    await userEvent.click(screen.getByRole("button", { name: "Requests" }));
+    expect(within(table).getAllByRole("row")[1]).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "View as chart" }));
     expect(screen.queryByRole("table")).toBeNull();
   });
 
   it("says when nothing was spent", () => {
-    render(<SpendChart days={days.map((d) => ({ ...d, cost_usd: "0.000000", models: {} }))} byModel={[]} />);
+    render(<UsageChart dayModel={[mk("2026-10-01", {}), mk("2026-10-02", {})]} dayKey={[]} keyId="" />);
     expect(screen.getByText("No spend in this range.")).toBeInTheDocument();
   });
 
-  it("has no accessibility violations, as a chart and as a table", async () => {
-    const { container } = render(<SpendChart days={days} byModel={models} />);
+  it("has no accessibility violations: chart, pinned, table, by key", async () => {
+    const { container } = renderChart();
+    expect(await axe(container)).toHaveNoViolations();
+    await userEvent.click(bars()[0]);
+    expect(await axe(container)).toHaveNoViolations();
+    await userEvent.click(screen.getByRole("button", { name: "By key" }));
     expect(await axe(container)).toHaveNoViolations();
     await userEvent.click(screen.getByRole("button", { name: "View as table" }));
     expect(await axe(container)).toHaveNoViolations();
@@ -158,61 +298,145 @@ describe("CacheAndHealth", () => {
 });
 
 describe("ModelTable", () => {
-  it("lists models with latency, cache hit and error rates", () => {
-    render(<ModelTable models={models} days={days} />);
+  const names = () => within(screen.getAllByRole("table")[0].querySelector("tbody") as HTMLElement).getAllByRole("row").map((r) => within(r).getByRole("rowheader").textContent);
+  const head = (n: string) => screen.getByRole("columnheader", { name: new RegExp(`^${n}`) });
+
+  it("lists models with latency, cache hit and error rates, highest spend first", () => {
+    render(<ModelTable models={models} />);
+    expect(names()).toEqual(["sonnet", "mini", "local"]);
     const row = screen.getByRole("rowheader", { name: "sonnet" }).closest("tr") as HTMLElement;
-    const cells = within(row).getAllByRole("cell").map((c) => c.textContent);
-    expect(cells).toEqual(["21,480", "31.2M", "8.9M", "$142.18", "1.9s", "5.2s", "21%", "0.4%"]);
+    expect(within(row).getAllByRole("cell").map((c) => c.textContent)).toEqual(["21,480", "31.2M", "8.9M", "$142.18", "1.9s", "5.2s", "21%", "0.4%"]);
+    expect(head("Cost")).toHaveAttribute("aria-sort", "descending");
+    expect(head("Model")).toHaveAttribute("aria-sort", "none");
   });
 
-  it("shows a dash instead of a latency it never measured", () => {
-    render(<ModelTable models={[grp({ key: "m", label: "m", requests: 4, cache_hits: 4 })]} days={[]} />);
-    const cells = within(screen.getByRole("rowheader", { name: "m" }).closest("tr") as HTMLElement).getAllByRole("cell").map((c) => c.textContent);
+  it("sorts by any column, and a second click reverses it", async () => {
+    render(<ModelTable models={models} />);
+    await userEvent.click(within(head("Model")).getByRole("button"));
+    expect(names()).toEqual(["local", "mini", "sonnet"]); // names start A to Z
+    expect(head("Model")).toHaveAttribute("aria-sort", "ascending");
+    await userEvent.click(within(head("Model")).getByRole("button"));
+    expect(names()).toEqual(["sonnet", "mini", "local"]);
+    expect(head("Model")).toHaveAttribute("aria-sort", "descending");
+
+    await userEvent.click(within(head("Requests")).getByRole("button"));
+    expect(names()).toEqual(["sonnet", "mini", "local"].sort((a, b) => ({ sonnet: 21480, mini: 19730, local: 7000 }[b]!) - ({ sonnet: 21480, mini: 19730, local: 7000 }[a]!))); // numbers start highest first
+    await userEvent.click(within(head("Requests")).getByRole("button"));
+    expect(names()).toEqual(["local", "mini", "sonnet"]);
+
+    await userEvent.click(within(head("p95")).getByRole("button"));
+    expect(names()).toEqual(["sonnet", "local", "mini"]);
+    await userEvent.click(within(head("Errors")).getByRole("button"));
+    expect(names()).toEqual(["mini", "sonnet", "local"]); // 1.1% mini, 0.4% sonnet, 0.2% local
+    expect(screen.getByRole("status")).toHaveTextContent("sorted by errors, highest first");
+  });
+
+  it("filters by name and totals only what is shown", async () => {
+    render(<ModelTable models={models} />);
+    await userEvent.type(screen.getByRole("searchbox", { name: "Filter models" }), "mini");
+    expect(names()).toEqual(["mini"]);
+    expect(screen.getByRole("status")).toHaveTextContent("1 of 3 models");
+    const foot = screen.getByRole("rowheader", { name: "Total of those shown" }).closest("tr") as HTMLElement;
+    expect(within(foot).getAllByRole("cell")[0]).toHaveTextContent("19,730");
+    await userEvent.clear(screen.getByRole("searchbox", { name: "Filter models" }));
+    await userEvent.type(screen.getByRole("searchbox", { name: "Filter models" }), "zzz");
+    expect(screen.getByText("No model matches “zzz”.")).toBeInTheDocument();
+  });
+
+  it("shows a dash instead of a latency it never measured, and sorts it last", async () => {
+    render(<ModelTable models={[...models, grp({ key: "idle", label: "idle", requests: 4, cache_hits: 4 })]} />);
+    const cells = within(screen.getByRole("rowheader", { name: "idle" }).closest("tr") as HTMLElement).getAllByRole("cell").map((c) => c.textContent);
     expect(cells.slice(4, 6)).toEqual(["—", "—"]);
+    await userEvent.click(within(head("p50")).getByRole("button"));
+    expect(names().at(-1)).toBe("idle");
+    await userEvent.click(within(head("p50")).getByRole("button"));
+    expect(names().at(-1)).toBe("idle");
   });
 
   it("has a totals row that adds up exactly", () => {
-    render(<ModelTable models={models} days={days} />);
+    render(<ModelTable models={models} />);
     const foot = screen.getByRole("rowheader", { name: "Total" }).closest("tr") as HTMLElement;
     const cells = within(foot).getAllByRole("cell").map((c) => c.textContent);
-    expect(cells[0]).toBe("48,210"); // 21,480 + 19,730 + 7,000
-    expect(cells[3]).toBe("$186.42"); // 142.18 + 44.24 + 0, summed in exact micro-dollars
+    expect(cells[0]).toBe("48,210");
+    expect(cells[3]).toBe("$186.42");
   });
 
   it("explains an empty range, and has no accessibility violations", async () => {
-    const { container, rerender } = render(<ModelTable models={models} days={days} />);
+    const { container, rerender } = render(<ModelTable models={models} />);
     expect(await axe(container)).toHaveNoViolations();
-    rerender(<ModelTable models={[]} days={[]} />);
+    rerender(<ModelTable models={[]} />);
     expect(screen.getByText("No requests in this range.")).toBeInTheDocument();
   });
 });
 
 describe("UsageControls", () => {
   const keys = [{ id: "k1", name: "support-agent" }, { id: "k2", name: "ci (revoked)" }];
+  const base = { preset: "14d" as const, from: "2026-09-25", to: "2026-10-08", today: "2026-10-08", keyId: "", keys, exportQuery: "from=2026-09-25&to=2026-10-08" };
 
   it("marks the current range and keeps the key when the range changes", () => {
-    render(<UsageControls preset="14d" keyId="k1" keys={keys} exportQuery="from=2026-09-25&to=2026-10-08&key_id=k1" />);
+    render(<UsageControls {...base} keyId="k1" />);
     expect(screen.getByRole("link", { name: "14 days" })).toHaveAttribute("aria-current", "true");
     expect(screen.getByRole("link", { name: "7 days" })).not.toHaveAttribute("aria-current");
     expect(screen.getByRole("link", { name: "7 days" })).toHaveAttribute("href", "/usage?range=7d&key=k1");
-    expect(screen.getByRole("link", { name: "This month" })).toHaveAttribute("href", "/usage?range=month&key=k1");
+    expect(screen.getByRole("link", { name: "30 days" })).toHaveAttribute("href", "/usage?range=30d&key=k1");
+    expect(screen.getByRole("link", { name: "90 days" })).toHaveAttribute("href", "/usage?range=90d&key=k1");
   });
 
-  it("changes the key through the URL and keeps the range", async () => {
+  it("offers longer ranges in a menu, and highlights it when one is chosen", async () => {
     push.mockClear();
-    render(<UsageControls preset="7d" keyId="" keys={keys} exportQuery="from=a&to=b" />);
+    const { rerender } = render(<UsageControls {...base} />);
+    const more = screen.getByRole("combobox", { name: "More ranges" });
+    expect(within(more).getAllByRole("option").map((o) => o.textContent)).toEqual(["More ranges", "This month", "Last month", "Last 6 months", "Last 12 months", "Custom range…"]);
+    await userEvent.selectOptions(more, "Last month");
+    expect(push).toHaveBeenCalledWith("/usage?range=last-month", { scroll: false });
+    rerender(<UsageControls {...base} preset="last-month" />);
+    expect(screen.getByRole("combobox", { name: "More ranges" })).toHaveValue("last-month");
+    for (const l of ["7 days", "14 days", "30 days", "90 days"]) expect(screen.getByRole("link", { name: l })).not.toHaveAttribute("aria-current");
+  });
+
+  it("opens date fields for a custom range, validates them, and applies a good one", async () => {
+    push.mockClear();
+    render(<UsageControls {...base} />);
+    expect(screen.queryByRole("form", { name: "Custom range" })).toBeNull();
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "More ranges" }), "Custom range…");
+    const form = screen.getByRole("form", { name: "Custom range" });
+    expect(within(form).getByLabelText("Last day")).toHaveAttribute("max", "2026-10-08");
+
+    fireEvent.change(within(form).getByLabelText("First day"), { target: { value: "2026-10-09" } });
+    expect(within(form).getByRole("alert")).toHaveTextContent("The first day is after the last day.");
+    expect(within(form).getByRole("button", { name: "Apply" })).toBeDisabled();
+
+    fireEvent.change(within(form).getByLabelText("First day"), { target: { value: "2026-08-01" } });
+    fireEvent.change(within(form).getByLabelText("Last day"), { target: { value: "2026-08-31" } });
+    expect(within(form).queryByRole("alert")).toBeNull();
+    await userEvent.click(within(form).getByRole("button", { name: "Apply" }));
+    expect(push).toHaveBeenCalledWith("/usage?range=custom&from=2026-08-01&to=2026-08-31", { scroll: false });
+  });
+
+  it("starts with the custom fields open and filled in when the range is custom", () => {
+    render(<UsageControls {...base} preset="custom" from="2026-08-01" to="2026-08-31" />);
+    const form = screen.getByRole("form", { name: "Custom range" });
+    expect(within(form).getByLabelText("First day")).toHaveValue("2026-08-01");
+    expect(within(form).getByLabelText("Last day")).toHaveValue("2026-08-31");
+  });
+
+  it("changes the key through the URL and keeps the range, including a custom one", async () => {
+    push.mockClear();
+    const { rerender } = render(<UsageControls {...base} preset="7d" />);
     await userEvent.selectOptions(screen.getByRole("combobox", { name: "API key" }), "support-agent");
     expect(push).toHaveBeenCalledWith("/usage?range=7d&key=k1", { scroll: false });
-    await userEvent.selectOptions(screen.getByRole("combobox", { name: "API key" }), "All API keys");
+    rerender(<UsageControls {...base} preset="custom" from="2026-08-01" to="2026-08-31" />);
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "API key" }), "support-agent");
+    expect(push).toHaveBeenLastCalledWith("/usage?range=custom&from=2026-08-01&to=2026-08-31&key=k1", { scroll: false });
   });
 
   it("exports exactly what is on screen", () => {
-    render(<UsageControls preset="14d" keyId="k1" keys={keys} exportQuery="from=2026-09-25&to=2026-10-08&key_id=k1" />);
+    render(<UsageControls {...base} keyId="k1" exportQuery="from=2026-09-25&to=2026-10-08&key_id=k1" />);
     expect(screen.getByRole("link", { name: "Export CSV" })).toHaveAttribute("href", "/api/usage/export?from=2026-09-25&to=2026-10-08&key_id=k1");
   });
 
-  it("has no accessibility violations", async () => {
-    const { container } = render(<UsageControls preset="14d" keyId="" keys={keys} exportQuery="from=a&to=b" />);
+  it("has no accessibility violations, with the custom fields open too", async () => {
+    const { container } = render(<UsageControls {...base} preset="custom" />);
     expect(await axe(container)).toHaveNoViolations();
   });
 });

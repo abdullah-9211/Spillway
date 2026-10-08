@@ -77,7 +77,7 @@ func seed(t *testing.T) seeded {
 
 func TestSummaryTotalsMatchTheSeededWorkload(t *testing.T) {
 	s := seed(t)
-	sum, err := s.r.Summary(context.Background(), s.rng, &s.key.ID, "model")
+	sum, err := s.r.Summary(context.Background(), s.rng, &s.key.ID, "model", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestSummaryTotalsMatchTheSeededWorkload(t *testing.T) {
 // The check from the phase's verify list: report totals equal a plain SQL SUM over usage.
 func TestSummaryEqualsSQLSum(t *testing.T) {
 	s := seed(t)
-	sum, err := s.r.Summary(context.Background(), s.rng, &s.key.ID, "day")
+	sum, err := s.r.Summary(context.Background(), s.rng, &s.key.ID, "day", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,25 +124,64 @@ func TestSummaryEqualsSQLSum(t *testing.T) {
 
 func TestGroupByDayUsesUTCDaysAndFillsQuietOnes(t *testing.T) {
 	s := seed(t)
-	sum, _ := s.r.Summary(context.Background(), s.rng, &s.key.ID, "day")
+	sum, _ := s.r.Summary(context.Background(), s.rng, &s.key.ID, "day", "")
 	if len(sum.Groups) != 3 {
 		t.Fatalf("a 3-day range has 3 groups, got %d", len(sum.Groups))
 	}
 	d10, d11, d12 := sum.Groups[0], sum.Groups[1], sum.Groups[2]
-	if d10.Key != "2021-03-10" || d10.Requests != 3 || d10.Cost != 3500 || d10.Models["alpha"] != 3500 {
+	if d10.Key != "2021-03-10" || d10.Requests != 3 || d10.Cost != 3500 || d10.Series["alpha"].Cost != 3500 {
 		t.Errorf("10 March (including 23:59:59.999999) = %+v", d10)
 	}
-	if d11.Requests != 5 || d11.Cost != 4000 || d11.Saved != 1500 || d11.Models["beta"] != 4000 {
+	if d11.Requests != 5 || d11.Cost != 4000 || d11.Saved != 1500 || d11.Series["beta"].Cost != 4000 {
 		t.Errorf("11 March (starting at exactly midnight) = %+v", d11)
 	}
-	if d12.Key != "2021-03-12" || d12.Requests != 0 || d12.Cost != 0 || len(d12.Models) != 0 {
+	if d12.Key != "2021-03-12" || d12.Requests != 0 || d12.Cost != 0 || len(d12.Series) != 0 {
 		t.Errorf("a quiet day is present with zeros: %+v", d12)
+	}
+}
+
+func TestDaysCanBeSplitByModelOrByKey(t *testing.T) {
+	s := seed(t)
+	byModel, err := s.r.Summary(context.Background(), s.rng, &s.key.ID, "day", "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d11 := byModel.Groups[1]
+	// 11 March: alpha had a cache hit and a rate-limited request; beta had a fallback success, a semantic hit and an error.
+	a, b := d11.Series["alpha"], d11.Series["beta"]
+	if byModel.Stack != "model" || a.Requests != 2 || a.Saved != 1000 || b.Requests != 3 || b.Cost != 4000 || b.InputTokens != 400 || b.OutputTokens != 40 || b.Label != "beta" {
+		t.Errorf("by model: alpha %+v beta %+v", a, b)
+	}
+	byKey, err := s.r.Summary(context.Background(), s.rng, &s.key.ID, "day", "key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	slice, ok := byKey.Groups[1].Series[s.key.ID.String()]
+	if byKey.Stack != "key" || !ok || slice.Label != s.key.Name || slice.Requests != 5 || slice.Cost != 4000 || slice.Saved != 1500 || len(byKey.Groups[1].Series) != 1 {
+		t.Errorf("by key: %+v", byKey.Groups[1].Series)
+	}
+	// Whichever way a day is split, the slices add up to the day.
+	for _, sum := range []*usage.Summary{byModel, byKey} {
+		for _, g := range sum.Groups {
+			var req int64
+			var cost money.Micros
+			for _, st := range g.Series {
+				req += st.Requests
+				cost += st.Cost
+			}
+			if req != g.Requests || cost != g.Cost {
+				t.Errorf("%s split by %s: slices %d requests %d micros, day %d requests %d micros", g.Key, sum.Stack, req, cost, g.Requests, g.Cost)
+			}
+		}
+	}
+	if _, err := s.r.Summary(context.Background(), s.rng, nil, "day", "colour"); err != usage.ErrBadStack {
+		t.Errorf("bad stack: %v", err)
 	}
 }
 
 func TestGroupByModelHasLatencyOfRealCallsOnly(t *testing.T) {
 	s := seed(t)
-	sum, _ := s.r.Summary(context.Background(), s.rng, &s.key.ID, "model")
+	sum, _ := s.r.Summary(context.Background(), s.rng, &s.key.ID, "model", "")
 	if len(sum.Groups) != 2 {
 		t.Fatalf("groups = %+v", sum.Groups)
 	}
@@ -161,7 +200,7 @@ func TestGroupByModelHasLatencyOfRealCallsOnly(t *testing.T) {
 
 func TestGroupByKey(t *testing.T) {
 	s := seed(t)
-	sum, err := s.r.Summary(context.Background(), s.rng, nil, "key")
+	sum, err := s.r.Summary(context.Background(), s.rng, nil, "key", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +214,7 @@ func TestGroupByKey(t *testing.T) {
 		t.Errorf("this key's row = %+v", mine)
 	}
 	// Narrowed to the key, only its row remains.
-	only, _ := s.r.Summary(context.Background(), s.rng, &s.key.ID, "key")
+	only, _ := s.r.Summary(context.Background(), s.rng, &s.key.ID, "key", "")
 	if len(only.Groups) != 1 {
 		t.Errorf("groups = %d, want 1", len(only.Groups))
 	}
@@ -185,7 +224,7 @@ func TestEmptyRange(t *testing.T) {
 	s := seed(t)
 	rng, _ := usage.ParseRange("2019-01-01", "2019-01-05", time.Now())
 	for _, g := range []string{"day", "model", "key"} {
-		sum, err := s.r.Summary(context.Background(), rng, &s.key.ID, g)
+		sum, err := s.r.Summary(context.Background(), rng, &s.key.ID, g, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -200,14 +239,14 @@ func TestEmptyRange(t *testing.T) {
 			t.Errorf("%s: groups = %d, want %d", g, len(sum.Groups), wantGroups)
 		}
 	}
-	if _, err := s.r.Summary(context.Background(), s.rng, nil, "planet"); err != usage.ErrBadGroup {
+	if _, err := s.r.Summary(context.Background(), s.rng, nil, "planet", ""); err != usage.ErrBadGroup {
 		t.Errorf("bad group: %v", err)
 	}
 }
 
 func TestProviderAttemptCounts(t *testing.T) {
 	s := seed(t)
-	sum, _ := s.r.Summary(context.Background(), s.rng, &s.key.ID, "model")
+	sum, _ := s.r.Summary(context.Background(), s.rng, &s.key.ID, "model", "")
 	got := map[string]usage.ProviderAttempts{}
 	for _, p := range sum.Providers {
 		got[p.Provider] = p

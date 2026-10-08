@@ -11,7 +11,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/abdullah-9211/spillway/internal/gateway"
-	"github.com/abdullah-9211/spillway/internal/money"
 	"github.com/abdullah-9211/spillway/internal/usage"
 )
 
@@ -20,24 +19,33 @@ type fakeUsage struct {
 	rng     usage.Range
 	key     *uuid.UUID
 	groupBy string
+	stack   string
 	filter  usage.RequestFilter
 }
 
-func (f *fakeUsage) Summary(_ context.Context, rng usage.Range, key *uuid.UUID, groupBy string) (*usage.Summary, error) {
-	f.rng, f.key, f.groupBy = rng, key, groupBy
+func (f *fakeUsage) Summary(_ context.Context, rng usage.Range, key *uuid.UUID, groupBy, stack string) (*usage.Summary, error) {
+	f.rng, f.key, f.groupBy, f.stack = rng, key, groupBy, stack
+	if stack != "" && stack != "model" && stack != "key" {
+		return nil, usage.ErrBadStack
+	}
+	if stack == "" {
+		stack = "model"
+	}
 	if groupBy == "" {
 		groupBy = "day"
 	}
 	if groupBy != "day" && groupBy != "model" && groupBy != "key" {
 		return nil, usage.ErrBadGroup
 	}
-	s := &usage.Summary{Range: rng, GroupBy: groupBy, Fallbacks: 3,
+	s := &usage.Summary{Range: rng, GroupBy: groupBy, Stack: stack, Fallbacks: 3,
 		Totals: usage.Totals{Metrics: usage.Metrics{Requests: 10, InputTokens: 1000, OutputTokens: 200, Cost: 9_000_000, Saved: 1_000_000, CacheHits: 2, Errors: 1}, Rejected: 1,
 			Cache: usage.CacheSplit{Miss: 6, HitExact: 1, HitSemantic: 1, Bypass: 2}},
 		Providers: []usage.ProviderAttempts{{Provider: "anthropic", FailedAttempts: 4, FallbacksTo: 0}, {Provider: "openai", FailedAttempts: 0, FallbacksTo: 3}}}
 	switch groupBy {
 	case "day":
-		s.Groups = []usage.Group{{Key: "2026-10-08", Label: "2026-10-08", Metrics: usage.Metrics{Requests: 10, Cost: 9_000_000}, Models: map[string]money.Micros{"sonnet": 7_000_000, "mini": 2_000_000}}}
+		s.Groups = []usage.Group{{Key: "2026-10-08", Label: "2026-10-08", Metrics: usage.Metrics{Requests: 10, Cost: 9_000_000}, Series: map[string]usage.SeriesStat{
+			"sonnet": {Label: "sonnet", Requests: 6, InputTokens: 600, OutputTokens: 100, Cost: 7_000_000, Saved: 500_000},
+			"mini":   {Label: "mini", Requests: 4, InputTokens: 400, OutputTokens: 100, Cost: 2_000_000}}}}
 	case "model":
 		s.Groups = []usage.Group{{Key: "sonnet", Label: "sonnet", Metrics: usage.Metrics{Requests: 6, Cost: 7_000_000}, TimedRequests: 5, P50Ms: 1900, P95Ms: 5200},
 			{Key: "local", Label: "local", Metrics: usage.Metrics{Requests: 4}}}
@@ -134,9 +142,11 @@ func TestUsageSummaryDayGroupsCarryPerModelCost(t *testing.T) {
 	r := newAdminRig(t)
 	_, body := r.json(t, "GET", "/admin/usage/summary", r.token(t, "viewer", "viewer-password"), "")
 	day := body["groups"].([]any)[0].(map[string]any)
-	models := day["models"].(map[string]any)
-	if body["group_by"] != "day" || models["sonnet"] != "7.000000" || models["mini"] != "2.000000" {
-		t.Errorf("group_by defaults to day with per-model cost: %v", body)
+	series := day["series"].(map[string]any)
+	sonnet := series["sonnet"].(map[string]any)
+	if body["group_by"] != "day" || body["stack"] != "model" || sonnet["cost_usd"] != "7.000000" || sonnet["requests"].(float64) != 6 ||
+		sonnet["input_tokens"].(float64) != 600 || sonnet["saved_usd"] != "0.500000" || sonnet["label"] != "sonnet" || series["mini"].(map[string]any)["cost_usd"] != "2.000000" {
+		t.Errorf("group_by defaults to day, split by model, with each model's figures: %v", body)
 	}
 }
 
@@ -150,6 +160,7 @@ func TestUsageParametersAreValidated(t *testing.T) {
 		"too long":        "/admin/usage/summary?from=2020-01-01&to=2026-10-01",
 		"bad key":         "/admin/usage/summary?key_id=nope",
 		"bad group":       "/admin/usage/summary?group_by=planet",
+		"bad stack":       "/admin/usage/summary?stack=colour",
 		"bad limit":       "/admin/usage/requests?limit=0",
 		"text limit":      "/admin/usage/requests?limit=many",
 		"bad cursor":      "/admin/usage/requests?cursor=bad",
@@ -166,6 +177,11 @@ func TestUsageQueryReachesTheReader(t *testing.T) {
 	r := newAdminRig(t)
 	viewer := r.token(t, "viewer", "viewer-password")
 	id := uuid.New()
+	r.json(t, "GET", "/admin/usage/summary?from=2026-10-01&to=2026-10-03&key_id="+id.String()+"&group_by=key", viewer, "")
+	r.json(t, "GET", "/admin/usage/summary?stack=key", viewer, "")
+	if r.usage.stack != "key" {
+		t.Errorf("stack = %q, want key", r.usage.stack)
+	}
 	r.json(t, "GET", "/admin/usage/summary?from=2026-10-01&to=2026-10-03&key_id="+id.String()+"&group_by=key", viewer, "")
 	if got := r.usage; got.groupBy != "key" || got.key == nil || *got.key != id ||
 		!got.rng.From.Equal(time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)) || !got.rng.To.Equal(time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC)) {

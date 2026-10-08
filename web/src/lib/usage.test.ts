@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  breakerPill, buildBars, chartSeries, compact, count, dollarsOf, microsOf, ms, niceCeil, parsePreset, percent, rangeFor, shares, sumUsd, tickLabel,
-  type UsageGroup,
-} from "./usage";
+import { breakerPill, compact, count, dollarsOf, microsOf, modelColors, ms, parseCustom, parsePreset, percent, rangeFor, shares, sumUsd, type UsageGroup } from "./usage";
 
 const g = (over: Partial<UsageGroup>): UsageGroup => ({
   key: "x", label: "x", requests: 0, input_tokens: 0, output_tokens: 0, cost_usd: "0.000000", saved_usd: "0.000000", cache_hits: 0, errors: 0,
@@ -23,10 +20,52 @@ describe("rangeFor", () => {
     expect(rangeFor("month", new Date("2026-03-01T00:00:00Z"))).toEqual({ from: "2026-03-01", to: "2026-03-01" });
     expect(rangeFor("7d", new Date("2026-01-03T10:00:00Z"))).toEqual({ from: "2025-12-28", to: "2026-01-03" });
   });
+  it("covers the longer ranges", () => {
+    expect(rangeFor("30d", now)).toEqual({ from: "2026-09-09", to: "2026-10-08" });
+    expect(rangeFor("90d", now)).toEqual({ from: "2026-07-11", to: "2026-10-08" });
+    expect(rangeFor("180d", now)).toEqual({ from: "2026-04-12", to: "2026-10-08" });
+    expect(rangeFor("365d", now)).toEqual({ from: "2025-10-09", to: "2026-10-08" });
+  });
+  it("last month is the whole previous calendar month, whatever day it is", () => {
+    expect(rangeFor("last-month", now)).toEqual({ from: "2026-09-01", to: "2026-09-30" });
+    expect(rangeFor("last-month", new Date("2026-03-31T10:00:00Z"))).toEqual({ from: "2026-02-01", to: "2026-02-28" });
+    expect(rangeFor("last-month", new Date("2028-03-05T10:00:00Z"))).toEqual({ from: "2028-02-01", to: "2028-02-29" });
+    expect(rangeFor("last-month", new Date("2026-01-15T10:00:00Z"))).toEqual({ from: "2025-12-01", to: "2025-12-31" });
+  });
+  it("no preset is longer than the 366 days the API allows", () => {
+    for (const p of ["7d", "14d", "30d", "90d", "month", "last-month", "180d", "365d"] as const) {
+      const r = rangeFor(p, now);
+      expect((Date.parse(r.to) - Date.parse(r.from)) / 86_400_000 + 1).toBeLessThanOrEqual(366);
+    }
+  });
   it("falls back to 14 days for anything unknown", () => {
     expect(parsePreset(undefined)).toBe("14d");
     expect(parsePreset("year")).toBe("14d");
     expect(parsePreset("7d")).toBe("7d");
+    expect(parsePreset("custom")).toBe("custom");
+    expect(parsePreset("last-month")).toBe("last-month");
+  });
+});
+
+describe("parseCustom", () => {
+  const now = new Date("2026-10-08T12:00:00Z");
+  it("accepts a good range, including one day", () => {
+    expect(parseCustom("2026-09-01", "2026-09-30", now)).toEqual({ from: "2026-09-01", to: "2026-09-30" });
+    expect(parseCustom("2026-10-08", "2026-10-08", now)).toEqual({ from: "2026-10-08", to: "2026-10-08" });
+  });
+  it.each([
+    ["missing", undefined, "2026-09-30", /first and a last/],
+    ["not a date", "yesterday", "2026-09-30", /first and a last/],
+    ["impossible date", "2026-02-30", "2026-03-05", /first and a last/],
+    ["backwards", "2026-09-30", "2026-09-01", /after the last/],
+    ["in the future", "2026-10-01", "2026-10-09", /future/],
+    ["too long", "2025-09-01", "2026-09-30", /at most 366/],
+  ])("rejects %s", (_n, from, to, msg) => {
+    const r = parseCustom(from, to, now);
+    expect("error" in r && r.error).toMatch(msg);
+  });
+  it("allows exactly 366 days", () => {
+    expect(parseCustom("2025-10-08", "2026-10-08", now)).toEqual({ from: "2025-10-08", to: "2026-10-08" });
   });
 });
 
@@ -66,80 +105,10 @@ describe("shares", () => {
   it("is all zeros for nothing", () => expect(shares([0, 0, 0])).toEqual([0, 0, 0]));
 });
 
-describe("niceCeil and ticks", () => {
-  it.each([[0, 1], [0.0045, 0.005], [0.7, 1], [1.2, 2], [2.1, 2.5], [3.4, 5], [11.8, 20], [19.9, 20], [20, 20], [21, 25], [86, 100]])(
-    "niceCeil(%s) = %s", (v, want) => expect(niceCeil(v)).toBeCloseTo(want, 9));
-  it("labels axes at the right precision", () => {
-    expect(tickLabel(20, 20)).toBe("$20");
-    expect(tickLabel(1.25, 5)).toBe("$1");
-    expect(tickLabel(0.5, 2)).toBe("$0.50");
-    expect(tickLabel(0.0025, 0.01)).toBe("$0.0025");
-    expect(tickLabel(0, 0.01)).toBe("$0");
-  });
-});
-
-describe("chart", () => {
-  const byModel = [
-    g({ key: "sonnet", label: "sonnet", cost_usd: "142.180000", requests: 10 }),
-    g({ key: "mini", label: "mini", cost_usd: "44.240000", requests: 10 }),
-    g({ key: "local", label: "local", cost_usd: "0.000000", requests: 5 }),
-  ];
-  const days = [
-    g({ key: "2026-09-30", requests: 3, cost_usd: "9.500000", models: { sonnet: "7.100000", mini: "2.100000" } }),
-    g({ key: "2026-10-01", requests: 0, cost_usd: "0.000000", models: {} }),
-  ];
-
-  it("gives the two costliest models their own colours and names free models without a bar", () => {
-    const { series, free, colorOf } = chartSeries(days, byModel);
-    expect(series.map((s) => [s.model, s.color])).toEqual([["sonnet", "var(--s1)"], ["mini", "var(--s2)"]]);
-    expect(free).toEqual(["local"]);
-    expect(colorOf("sonnet")).toBe("var(--s1)");
-  });
-
-  it("groups further paid models as other", () => {
-    const many = [...byModel, g({ key: "flash", label: "flash", cost_usd: "3.000000", requests: 2 }), g({ key: "haiku", label: "haiku", cost_usd: "1.000000", requests: 2 })];
-    const { series } = chartSeries(days, many);
-    expect(series.map((s) => s.label)).toEqual(["sonnet", "mini", "other models"]);
-    const { bars } = buildBars([g({ key: "2026-10-01", cost_usd: "4.000000", models: { flash: "3.000000", haiku: "1.000000" } })], series);
-    expect(bars[0].segments).toHaveLength(1);
-    expect(bars[0].segments[0]).toMatchObject({ model: "other", cost: "4.000000" });
-  });
-
-  it("scales to a round axis and stacks segments to the day's total", () => {
-    const { series } = chartSeries(days, byModel);
-    const { bars, top, ticks } = buildBars(days, series);
-    expect(top).toBe(10);
-    expect(ticks).toHaveLength(5); // top first
-    expect(ticks[0]).toBe("$10");
-    expect(ticks[4]).toBe("$0");
-    const sum = bars[0].segments.reduce((a, s) => a + s.height, 0);
-    expect(sum).toBeLessThanOrEqual(bars[0].height + 1e-9);
-    expect(bars[0].height).toBeCloseTo(95, 5);
-    expect(bars[0].tip).toContain("Sep 30: $9.50 spent");
-    expect(bars[0].tip).toContain("sonnet $7.10");
-    expect(bars[1].segments).toEqual([]);
-    expect(bars[1].label).toBe("Oct 1"); // the first of a month is labelled with its month
-    expect(bars[0].label).toBe("30");
-  });
-
-  it("draws a model that appears on a day but not in the by-model list, as other", () => {
-    const { series } = chartSeries([g({ key: "2026-10-01", cost_usd: "1.000000", models: { ghost: "1.000000" } })], byModel);
-    expect(series.map((s) => s.model)).toContain("other");
-  });
-
-  it("table totals equal the bar totals", () => {
-    const { series } = chartSeries(days, byModel);
-    const { bars } = buildBars(days, series);
-    const chartTotal = sumUsd(bars.map((b) => b.total));
-    expect(chartTotal).toBe(sumUsd(days.map((d) => d.cost_usd)));
-  });
-
-  it("copes with a range that spent nothing", () => {
-    const quiet = [g({ key: "2026-10-01" }), g({ key: "2026-10-02" })];
-    const { bars, top, ticks } = buildBars(quiet, []);
-    expect(top).toBe(1);
-    expect(bars.every((b) => b.height === 0 && b.segments.length === 0)).toBe(true);
-    expect(ticks[4]).toBe("$0");
+describe("modelColors", () => {
+  it("gives the two costliest models their own colour and everything else grey", () => {
+    const c = modelColors([g({ key: "a", cost_usd: "1.000000" }), g({ key: "b", cost_usd: "5.000000" }), g({ key: "c", cost_usd: "3.000000" }), g({ key: "free", cost_usd: "0.000000" })]);
+    expect([c("b"), c("c"), c("a"), c("free"), c("unknown")]).toEqual(["var(--s1)", "var(--s2)", "var(--s3)", "var(--s3)", "var(--s3)"]);
   });
 });
 

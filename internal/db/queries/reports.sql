@@ -116,3 +116,21 @@ WHERE u.created_at >= @from_ts AND u.created_at < @to_ts
   AND (sqlc.narg(key_id)::uuid IS NULL OR u.api_key_id = sqlc.narg(key_id)::uuid)
 GROUP BY 1, 2, 3
 ORDER BY 1, 2, 3;
+
+-- name: ReportByDayKey :many
+SELECT
+  (u.created_at AT TIME ZONE 'UTC')::date              AS day,
+  u.api_key_id                                         AS key_id,
+  COALESCE(k.name, '(deleted key)')::text              AS key_name,
+  count(*)::bigint                                     AS requests,
+  COALESCE(sum(u.input_tokens), 0)::bigint             AS input_tokens,
+  COALESCE(sum(u.output_tokens), 0)::bigint            AS output_tokens,
+  COALESCE(sum(u.cost_usd), 0)::numeric                AS cost_usd,
+  COALESCE(sum(u.saved_usd), 0)::numeric               AS saved_usd,
+  count(*) FILTER (WHERE u.cache_status IN ('hit_exact', 'hit_semantic'))::bigint AS cache_hits,
+  count(*) FILTER (WHERE u.outcome IN ('upstream_error', 'all_providers_failed'))::bigint AS errors
+FROM usage u LEFT JOIN api_keys k ON k.id = u.api_key_id
+WHERE u.created_at >= @from_ts AND u.created_at < @to_ts
+  AND (sqlc.narg(key_id)::uuid IS NULL OR u.api_key_id = sqlc.narg(key_id)::uuid)
+GROUP BY 1, 2, 3
+ORDER BY 1, 2;
