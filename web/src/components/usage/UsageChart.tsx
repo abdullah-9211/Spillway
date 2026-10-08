@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { buildBars, defaultGran, formatValue, METRICS, planSeries, toBuckets, valueOf, zoomRange, type BarModel, type Bucket, type Gran, type Metric, type Stack } from "@/lib/chart";
+import { buildBars, defaultGran, detailRows, formatValue, IDLE_NAMES, METRICS, planSeries, toBuckets, uniqueNames, valueOf, zoomRange, type BarModel, type Bucket, type Gran, type Metric, type Stack } from "@/lib/chart";
 import { compact, count, percent, type UsageGroup } from "@/lib/usage";
 
 function Toggle<T extends string>({ label, value, options, onChange, disabled, hint }: {
@@ -25,7 +25,7 @@ function Toggle<T extends string>({ label, value, options, onChange, disabled, h
 }
 
 function Detail({ bucket, metric, keyId, onClose }: { bucket: Bucket; metric: Metric; keyId: string; onClose: () => void }) {
-  const cells = [...bucket.cells.entries()].map(([id, c]) => ({ id, ...c, v: valueOf(c, metric) })).sort((a, b) => b.v - a.v || a.label.localeCompare(b.label));
+  const { rows, more, idle } = detailRows(bucket, metric);
   const z = zoomRange(bucket);
   const q = new URLSearchParams({ range: "custom", from: z.from, to: z.to });
   if (keyId) q.set("key", keyId);
@@ -50,14 +50,29 @@ function Detail({ bucket, metric, keyId, onClose }: { bucket: Bucket; metric: Me
         <div><dt>Cache hits</dt><dd>{percent(bucket.cacheHits, bucket.requests)}</dd></div>
         <div><dt>Errors</dt><dd>{percent(bucket.errors, bucket.requests, 1)}</dd></div>
       </dl>
-      {cells.length > 0 && (
+      {(rows.length > 0 || idle > 0) && (
         <ul className="cdetail__list">
-          {cells.map((c) => (
-            <li key={c.id}>
-              <span>{c.label}</span>
-              <span className="num">{formatValue(c.v, metric)}</span>
+          {rows.map((r) => (
+            <li key={r.label}>
+              <span>
+                {r.label}
+                {r.n > 1 && <span className="mute"> ×{r.n}</span>}
+              </span>
+              <span className="num">{formatValue(r.value, metric)}</span>
             </li>
           ))}
+          {more && (
+            <li className="cdetail__more">
+              <span>{count(more.count)} more</span>
+              <span className="num">{formatValue(more.value, metric)}</span>
+            </li>
+          )}
+          {idle > 0 && (
+            <li className="cdetail__more">
+              <span>{count(idle)} with none</span>
+              <span className="num">{formatValue(0, metric)}</span>
+            </li>
+          )}
         </ul>
       )}
     </div>
@@ -144,12 +159,17 @@ export function UsageChart({ dayModel, dayKey, keyId }: { dayModel: UsageGroup[]
             {s.label}
           </button>
         ))}
-        {idle.map((f) => (
+        {uniqueNames(idle).slice(0, IDLE_NAMES).map((f) => (
           <span key={f} className="lg lg--idle">
             <i className="sw sw--free" />
-            {f} ({metric === "spend" ? "free, no bar" : "none"})
+            {f} ({metric === "spend" ? (stack === "key" ? "no spend" : "free, no bar") : "none"})
           </span>
         ))}
+        {uniqueNames(idle).length > IDLE_NAMES && (
+          <span className="lg lg--idle" title={uniqueNames(idle).join(", ")}>
+            and {uniqueNames(idle).length - IDLE_NAMES} more with no {metric === "spend" ? "spend" : "activity"}
+          </span>
+        )}
         {hidden.size > 0 && (
           <button type="button" className="link-btn" onClick={() => setHidden(new Set())}>Show all</button>
         )}

@@ -170,3 +170,20 @@ export function breakerPill(p: Pick<ProviderHealth, "state" | "open_remaining_se
       return { label: "Not configured", tone: "mute", icon: "M2.5 6h7" };
   }
 }
+
+// --- the key filter's choices ---
+
+export const MAX_KEY_CHOICES = 40;
+
+/**
+ * Keys worth offering in the filter: ones that have been used, most recently used first, capped so the menu stays
+ * short. The key already selected is always included, so the current view can be shown and left.
+ */
+export function keyChoices(keys: { id: string; name: string; revoked_at: string | null; last_used_at: string | null; builtin: boolean }[], selected: string): { id: string; name: string }[] {
+  const used = keys
+    .filter((k) => k.last_used_at && !k.builtin)
+    .sort((a, b) => (b.last_used_at as string).localeCompare(a.last_used_at as string))
+    .slice(0, MAX_KEY_CHOICES);
+  const picked = used.some((k) => k.id === selected) ? used : [...used, ...keys.filter((k) => k.id === selected)];
+  return picked.map((k) => ({ id: k.id, name: k.revoked_at ? `${k.name} (revoked)` : k.name }));
+}

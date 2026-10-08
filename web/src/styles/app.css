@@ -432,3 +432,4 @@ button.lg:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; 
 .sortbtn:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .sortbtn--on { color: var(--text); }
 .t--sortable th:first-child .sortbtn { margin-left: 0; }
+.cdetail__more { color: var(--mute); }

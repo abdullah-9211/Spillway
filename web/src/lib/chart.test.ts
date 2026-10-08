@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildBars, defaultGran, formatValue, niceCeil, planSeries, tickLabel, toBuckets, valueOf, weekStart, zoomRange } from "./chart";
+import { buildBars, defaultGran, detailRows, formatValue, niceCeil, planSeries, tickLabel, toBuckets, uniqueNames, valueOf, weekStart, zoomRange } from "./chart";
 import { sumUsd, type UsageGroup } from "./usage";
 
 type Series = NonNullable<UsageGroup["series"]>;
@@ -185,5 +185,40 @@ describe("helpers", () => {
     expect(defaultGran(45)).toBe("day");
     expect(defaultGran(46)).toBe("week");
     expect(defaultGran(365)).toBe("week");
+  });
+});
+
+describe("keeping long lists readable", () => {
+  const many = day("2026-10-01", {
+    ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`dup${i}`, st("usage-test", 1, "0.030000")])),
+    big: st("demo-data", 100, "0.570000"),
+    ...Object.fromEntries(Array.from({ length: 30 }, (_, i) => [`free${i}`, st("usage-fail", 1, "0.000000")])),
+    ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`tiny${i}`, st(`tiny-${i}`, 1, "0.000001")])),
+  });
+  const b = toBuckets([many], "day")[0];
+
+  it("merges keys that share a name and lists the biggest few", () => {
+    const { rows, more, idle } = detailRows(b, "spend");
+    expect(rows[0]).toEqual({ label: "demo-data", value: 0.57, n: 1 });
+    expect(rows[1].label).toBe("usage-test");
+    expect(rows[1].n).toBe(12);
+    expect(rows[1].value).toBeCloseTo(0.36, 9);
+    expect(rows).toHaveLength(8);
+    expect(more).toEqual({ count: 6, value: expect.closeTo(0.000006, 9) }); // 12 tiny keys: 6 listed, 6 summarised
+    expect(idle).toBe(30);
+  });
+
+  it("never returns a row per key", () => {
+    expect(detailRows(b, "spend").rows.length).toBeLessThanOrEqual(8);
+    expect(detailRows(b, "requests").rows.length).toBeLessThanOrEqual(8);
+  });
+
+  it("has no summary lines when everything fits", () => {
+    const small = toBuckets([day("2026-10-01", { a: st("a", 1, "1.000000"), b: st("b", 1, "2.000000") })], "day")[0];
+    expect(detailRows(small, "spend")).toMatchObject({ more: null, idle: 0 });
+  });
+
+  it("dedupes names for the legend, keeping order", () => {
+    expect(uniqueNames(["a", "b", "a", "c", "b"])).toEqual(["a", "b", "c"]);
   });
 });

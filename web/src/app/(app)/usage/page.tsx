@@ -7,7 +7,7 @@ import { UsageControls } from "@/components/usage/UsageControls";
 import { adminFetch } from "@/lib/api";
 import type { ApiKey } from "@/lib/format";
 import { requireSession } from "@/lib/session";
-import { parseCustom, parsePreset, rangeFor, type UsageSummary } from "@/lib/usage";
+import { keyChoices, parseCustom, parsePreset, rangeFor, type UsageSummary } from "@/lib/usage";
 
 export const metadata: Metadata = { title: "Usage and cost" };
 
@@ -39,7 +39,7 @@ export default async function UsagePage({ searchParams }: { searchParams: Promis
     adminFetch<{ keys: ApiKey[] }>("/admin/keys", { token }),
   ]);
 
-  const keyOptions = keys.ok ? keys.data.keys.filter((k) => !k.builtin || k.id === keyId).map((k) => ({ id: k.id, name: k.revoked_at ? `${k.name} (revoked)` : k.name })) : [];
+  const keyOptions = keys.ok ? keyChoices(keys.data.keys, keyId) : [];
   const keyName = keyOptions.find((k) => k.id === keyId)?.name;
 
   const failure = [byDay, byDayKey, byModel].find((r) => !r.ok);

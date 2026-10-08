@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { breakerPill, compact, count, dollarsOf, microsOf, modelColors, ms, parseCustom, parsePreset, percent, rangeFor, shares, sumUsd, type UsageGroup } from "./usage";
+import { breakerPill, compact, keyChoices, count, dollarsOf, microsOf, modelColors, ms, parseCustom, parsePreset, percent, rangeFor, shares, sumUsd, type UsageGroup } from "./usage";
 
 const g = (over: Partial<UsageGroup>): UsageGroup => ({
   key: "x", label: "x", requests: 0, input_tokens: 0, output_tokens: 0, cost_usd: "0.000000", saved_usd: "0.000000", cache_hits: 0, errors: 0,
@@ -119,5 +119,23 @@ describe("breakerPill", () => {
     expect(breakerPill({ state: "open", open_remaining_seconds: 21 })).toMatchObject({ label: "Breaker open for 21s", tone: "fail" });
     expect(breakerPill({ state: "not_configured", open_remaining_seconds: null })).toMatchObject({ label: "Not configured", tone: "mute" });
     for (const s of ["closed", "half_open", "open", "not_configured"] as const) expect(breakerPill({ state: s, open_remaining_seconds: null }).icon).toMatch(/^M/);
+  });
+});
+
+describe("keyChoices", () => {
+  const k = (id: string, name: string, used: string | null, o: Partial<{ revoked_at: string | null; builtin: boolean }> = {}) => ({ id, name, last_used_at: used, revoked_at: null, builtin: false, ...o });
+  it("offers used keys, most recent first, and hides the rest", () => {
+    const out = keyChoices([k("a", "old", "2026-10-01T00:00:00Z"), k("b", "never", null), k("c", "new", "2026-10-08T00:00:00Z"), k("d", "pg", "2026-10-09T00:00:00Z", { builtin: true })], "");
+    expect(out.map((x) => x.id)).toEqual(["c", "a"]);
+  });
+  it("marks revoked keys, and caps the list", () => {
+    const many = Array.from({ length: 100 }, (_, i) => k(`k${i}`, `key-${i}`, `2026-10-${String((i % 28) + 1).padStart(2, "0")}T00:00:00Z`));
+    expect(keyChoices(many, "")).toHaveLength(40);
+    expect(keyChoices([k("r", "gone", "2026-10-01T00:00:00Z", { revoked_at: "2026-10-02T00:00:00Z" })], "")[0].name).toBe("gone (revoked)");
+  });
+  it("always includes the selected key, even if it is unused or past the cap", () => {
+    const many = Array.from({ length: 100 }, (_, i) => k(`k${i}`, `key-${i}`, "2026-10-08T00:00:00Z"));
+    many.push(k("sel", "selected", null));
+    expect(keyChoices(many, "sel").map((x) => x.id)).toContain("sel");
   });
 });

@@ -217,3 +217,36 @@ export function zoomRange(b: Bucket): { from: string; to: string } {
 export function defaultGran(dayCount: number): Gran {
   return dayCount > 45 ? "week" : "day";
 }
+
+// --- keeping long lists readable ---
+
+export const DETAIL_ROWS = 8;
+export const IDLE_NAMES = 3;
+
+/**
+ * The per-series list in a pinned bar: series with the same label are merged (many keys can share a name), the
+ * biggest few are listed, and the rest are summarised in one line, so a hundred small keys never become a hundred rows.
+ */
+export function detailRows(b: Bucket, metric: Metric, limit = DETAIL_ROWS): { rows: { label: string; value: number; n: number }[]; more: { count: number; value: number } | null; idle: number } {
+  const merged = new Map<string, { label: string; value: number; n: number }>();
+  let idle = 0;
+  for (const c of b.cells.values()) {
+    const v = valueOf(c, metric);
+    if (v <= 0) {
+      idle++;
+      continue;
+    }
+    const m = merged.get(c.label) ?? { label: c.label, value: 0, n: 0 };
+    m.value += v;
+    m.n++;
+    merged.set(c.label, m);
+  }
+  const all = [...merged.values()].sort((a, b) => b.value - a.value || a.label.localeCompare(b.label));
+  const rest = all.slice(limit);
+  return { rows: all.slice(0, limit), more: rest.length ? { count: rest.reduce((a, r) => a + r.n, 0), value: rest.reduce((a, r) => a + r.value, 0) } : null, idle };
+}
+
+/** Distinct names, in order, for the legend's "no bar" entries. */
+export function uniqueNames(names: string[]): string[] {
+  return [...new Set(names)];
+}

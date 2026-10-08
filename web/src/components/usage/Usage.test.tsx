@@ -201,6 +201,27 @@ describe("UsageChart", () => {
     expect(screen.queryByRole("button", { name: "Show all" })).toBeNull();
   });
 
+  it("keeps the legend and the pinned details short when there are very many keys", async () => {
+    const lots = (key: string): UsageGroup => {
+      const series: Record<string, ReturnType<typeof stat>> = { big: stat("demo-data", 100, "5.000000") };
+      for (let i = 0; i < 40; i++) series[`d${i}`] = stat("usage-test", 1, "0.030000"); // 40 keys with one name
+      for (let i = 0; i < 25; i++) series[`z${i}`] = stat("usage-fail", 1, "0.000000"); // 25 keys with no spend
+      return mk(key, series);
+    };
+    const d = [lots("2026-10-01"), lots("2026-10-02")];
+    render(<UsageChart dayModel={d} dayKey={d} keyId="" />);
+    await userEvent.click(screen.getByRole("button", { name: "By key" }));
+    const legend = document.querySelector(".legend") as HTMLElement;
+    expect(within(legend).getAllByText(/usage-fail/)).toHaveLength(1); // one entry, not 25
+    expect(within(legend).getByText("usage-fail (no spend)")).toBeInTheDocument();
+    await userEvent.click(bars()[0]);
+    const detail = screen.getByRole("region", { name: "Details for Oct 1" });
+    expect(within(detail).getAllByRole("listitem").length).toBeLessThanOrEqual(5);
+    expect(within(detail).getByText("usage-test")).toBeInTheDocument();
+    expect(within(detail).getByText("×40")).toBeInTheDocument();
+    expect(within(detail).getByText("25 with none")).toBeInTheDocument();
+  });
+
   it("splits by API key instead of by model", async () => {
     renderChart();
     await userEvent.click(screen.getByRole("button", { name: "By key" }));
