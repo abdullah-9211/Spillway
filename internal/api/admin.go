@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/abdullah-9211/spillway/internal/auth"
+	"github.com/abdullah-9211/spillway/internal/gateway"
 )
 
 // Access says who may call an admin route. Every route is registered with one, which is what the role
@@ -43,8 +44,12 @@ type AdminDeps struct {
 	Users    UserStore
 	Signer   *auth.Signer
 	Throttle *auth.Throttle
-	Keys     KeyAdmin     // the key endpoints are registered only when this is set
-	Deps     []Dependency // reported by /admin/status
+	Keys     KeyAdmin   // the key endpoints are registered only when this is set
+	Usage    UsageAdmin // the usage endpoints are registered only when this is set
+	// Health and Latency feed the provider-health and added-latency parts of the usage summary.
+	Health  func() []gateway.ProviderHealth
+	Latency LatencySource
+	Deps    []Dependency // reported by /admin/status
 	// DummyHashParams is the cost of the hash checked for unknown usernames. It must match the cost of the
 	// real hashes, or timing tells an attacker which usernames exist. Zero means auth.DefaultParams.
 	DummyHashParams auth.Params
@@ -81,6 +86,9 @@ func NewAdmin(d AdminDeps) *Admin {
 	a.handle("GET", "/admin/status", AccessViewer, a.status)
 	if d.Keys != nil {
 		a.registerKeys()
+	}
+	if d.Usage != nil {
+		a.registerUsage()
 	}
 	return a
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -103,6 +104,36 @@ func (g *Gateway) Catalog() *Catalog { return g.cat }
 
 // BreakerStates reports each provider's breaker, for metrics and the dashboard.
 func (g *Gateway) BreakerStates() map[string]BreakerState { return g.breakers.States() }
+
+// ProviderHealth is one provider as the dashboard shows it.
+type ProviderHealth struct {
+	Name          string
+	State         string // closed, open, half_open, or not_configured
+	OpenRemaining time.Duration
+	Reason        string // why a provider is not configured
+}
+
+// ProviderHealth lists every provider a model uses with its breaker, so a provider that has never been called
+// still appears, as closed.
+func (g *Gateway) ProviderHealth() []ProviderHealth {
+	used := map[string]bool{}
+	for _, m := range g.cat.Models {
+		used[m.Provider] = true
+	}
+	var out []ProviderHealth
+	for name := range used {
+		h := ProviderHealth{Name: name}
+		if why, missing := g.exec.missing[name]; missing {
+			h.State, h.Reason = "not_configured", why
+		} else {
+			br := g.breakers.For(name)
+			h.State, h.OpenRemaining = br.State().String(), br.OpenRemaining()
+		}
+		out = append(out, h)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
 
 // WaitForFills blocks until background cache writes finish. Tests use it; shutdown uses it too.
 func (g *Gateway) WaitForFills() { g.fills.Wait() }

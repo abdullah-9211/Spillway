@@ -6,17 +6,19 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/abdullah-9211/spillway/internal/db"
 	"github.com/abdullah-9211/spillway/internal/db/sqlcgen"
@@ -36,6 +38,7 @@ type stack struct {
 	writer *usage.Writer
 	keys   *keys.Store
 	q      *sqlcgen.Queries
+	pool   *pgxpool.Pool
 }
 
 func newStack(t *testing.T) *stack { return newStackWith(t, nil) }
@@ -75,7 +78,7 @@ func newStackWith(t *testing.T, build func(pg *db.Postgres) gateway.Options) *st
 	}
 	srv := httptest.NewServer(NewHandler(Options{Gateway: gw, Auth: store, Log: log, Deps: []Dependency{{pg, true}}, Metrics: metrics}))
 	t.Cleanup(func() { srv.Close(); gw.WaitForFills(); _ = writer.Close(context.Background()) })
-	return &stack{gw: gw, srv: srv, prov: p, prov2: p2, writer: writer, keys: store, q: sqlcgen.New(pg.Pool)}
+	return &stack{pool: pg.Pool, gw: gw, srv: srv, prov: p, prov2: p2, writer: writer, keys: store, q: sqlcgen.New(pg.Pool)}
 }
 
 func (s *stack) newKey(t *testing.T, name string) (keys.Key, string) {
@@ -254,4 +257,25 @@ func TestAttemptsArePersistedAsJSON(t *testing.T) {
 	if attempts[0].Injected {
 		t.Error("injected is reserved for playground faults")
 	}
+}
+
+// memCache is an in-process exact cache, so tests that want a cache hit do not need Redis.
+type memCache struct {
+	mu sync.Mutex
+	m  map[string]*gateway.Entry
+}
+
+func newMemCache() *memCache { return &memCache{m: map[string]*gateway.Entry{}} }
+
+func (c *memCache) Get(_ context.Context, k string) (*gateway.Entry, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.m[k], nil
+}
+
+func (c *memCache) Set(_ context.Context, k string, e *gateway.Entry, _ time.Duration) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.m[k] = e
+	return nil
 }

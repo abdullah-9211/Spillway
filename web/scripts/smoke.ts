@@ -74,11 +74,20 @@ for (const [label, who, role] of [["admin", admin, "admin"], ["viewer", viewer, 
     check("a revoked key is refused on the gateway (401)", refused.status === 401, `status ${refused.status}`);
   }
 
-  const other = await fetch(base + "/usage", { headers: { cookie } });
-  check(`${label} can open Usage`, other.status === 200 && (await other.text()).includes("Usage and cost"));
+  const usagePage = await fetch(base + "/usage", { headers: { cookie } });
+  const usageHtml = await usagePage.text();
+  check(`${label} can open Usage and cost`, usagePage.status === 200 && usageHtml.includes("Usage and cost") && usageHtml.includes("Spend per day") && usageHtml.includes("By model") && usageHtml.includes("Provider health"), `status ${usagePage.status}`);
+  const week = await fetch(base + "/usage?range=7d", { headers: { cookie } });
+  check(`${label} can switch the range`, week.status === 200 && (await week.text()).includes('aria-current="true"'));
+  const csv = await fetch(base + "/api/usage/export?from=2020-01-01&to=2020-01-31", { headers: { cookie } });
+  const csvText = await csv.text();
+  check(`${label} can export a CSV`, csv.status === 200 && (csv.headers.get("content-type") ?? "").includes("text/csv") && csvText.startsWith("day,key,model,requests"), `status ${csv.status}: ${csvText.slice(0, 60)}`);
 }
 
-const forged = await fetch(base + "/", { headers: { cookie: "spillway_session=not.a.real.token" }, redirect: "manual" });
+const noCsv = await fetch(base + "/api/usage/export", { redirect: "manual" });
+  check("the CSV export needs a session", noCsv.status === 401 || (noCsv.status >= 300 && noCsv.status < 400), `status ${noCsv.status}`);
+
+  const forged = await fetch(base + "/", { headers: { cookie: "spillway_session=not.a.real.token" }, redirect: "manual" });
 check("a forged session cookie is not accepted", forged.status >= 300 && forged.status < 400, `status ${forged.status}`);
 
   process.exit(failed ? 1 : 0);

@@ -506,3 +506,34 @@ func TestStreamsAreNotHedged(t *testing.T) {
 		t.Errorf("streams are never hedged, p2 called %d times", n)
 	}
 }
+
+func TestProviderHealth(t *testing.T) {
+	r := newExecRig(t, func(c *Catalog) { c.Exec.MaxRetries = 0 })
+	r.gw.exec.cfg.MaxRetries = 0
+	r.gw.exec.missing = map[string]string{"p3": "P3_KEY is not set"}
+	delete(r.gw.exec.providers, "p3")
+	r.p["p1"].Default = fake.Behavior{Status: 500}
+	for i := 0; i < 5; i++ {
+		r.gw.Chat(context.Background(), testKey, uuid.New(), "", userReq("chain"))
+	}
+	byName := map[string]ProviderHealth{}
+	for _, h := range r.gw.ProviderHealth() {
+		byName[h.Name] = h
+	}
+	if len(byName) != 3 {
+		t.Fatalf("every provider a model uses is listed, even one never called: %v", byName)
+	}
+	if h := byName["p1"]; h.State != "open" || h.OpenRemaining <= 0 {
+		t.Errorf("p1 = %+v", h)
+	}
+	if byName["p2"].State != "closed" {
+		t.Errorf("p2 = %+v", byName["p2"])
+	}
+	if h := byName["p3"]; h.State != "not_configured" || h.Reason != "P3_KEY is not set" {
+		t.Errorf("p3 = %+v", h)
+	}
+	r.clk.advance(31 * time.Second)
+	if h := r.gw.ProviderHealth()[0]; h.State != "half_open" || h.OpenRemaining != 0 {
+		t.Errorf("after the wait p1 is probing: %+v", h)
+	}
+}

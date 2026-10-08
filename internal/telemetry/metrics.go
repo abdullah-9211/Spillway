@@ -35,12 +35,14 @@ type Metrics struct {
 	cacheHits *prometheus.CounterVec
 	depErrors *prometheus.CounterVec
 
+	started time.Time
+
 	mu      sync.RWMutex
 	breaker func() map[string]int
 }
 
 func NewMetrics() *Metrics {
-	m := &Metrics{reg: prometheus.NewRegistry()}
+	m := &Metrics{reg: prometheus.NewRegistry(), started: time.Now()}
 	m.requests = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "spillway_gateway_requests_total", Help: "Gateway requests by policy, answering provider and model, outcome and cache status.",
 	}, []string{"policy", "provider", "model", "outcome", "cache"})
@@ -126,4 +128,58 @@ func (c breakerCollector) Collect(ch chan<- prometheus.Metric) {
 	for p, s := range f() {
 		ch <- prometheus.MustNewConstMetric(breakerDesc, prometheus.GaugeValue, float64(s), p)
 	}
+}
+
+// Quantiles estimates quantiles of the overhead histogram the way Prometheus's histogram_quantile does, by linear
+// interpolation inside the bucket that holds the target rank. Values are seconds. ok is false when nothing has
+// been observed yet. The histogram lives in memory, so it covers the time since this process started.
+func (m *Metrics) OverheadQuantiles(qs ...float64) (values []float64, samples uint64, since time.Time, ok bool) {
+	fams, err := m.reg.Gather()
+	if err != nil {
+		return nil, 0, m.started, false
+	}
+	for _, f := range fams {
+		if f.GetName() != "spillway_gateway_overhead_seconds" || len(f.Metric) == 0 {
+			continue
+		}
+		h := f.Metric[0].GetHistogram()
+		samples = h.GetSampleCount()
+		if samples == 0 {
+			return nil, 0, m.started, false
+		}
+		type bucket struct {
+			upper float64
+			cum   uint64
+		}
+		var bs []bucket
+		for _, b := range h.Bucket {
+			bs = append(bs, bucket{b.GetUpperBound(), b.GetCumulativeCount()})
+		}
+		for _, q := range qs {
+			rank := q * float64(samples)
+			v := bs[len(bs)-1].upper
+			prevUpper, prevCum := 0.0, uint64(0)
+			for _, b := range bs {
+				if float64(b.cum) >= rank {
+					if b.cum == prevCum || b.upper > 1e300 { // an empty bucket or the +Inf bucket: nothing to interpolate
+						v = max(prevUpper, minFinite(b.upper, prevUpper))
+					} else {
+						v = prevUpper + (b.upper-prevUpper)*(rank-float64(prevCum))/float64(b.cum-prevCum)
+					}
+					break
+				}
+				prevUpper, prevCum = b.upper, b.cum
+			}
+			values = append(values, v)
+		}
+		return values, samples, m.started, true
+	}
+	return nil, 0, m.started, false
+}
+
+func minFinite(a, b float64) float64 {
+	if a > 1e300 {
+		return b
+	}
+	return a
 }

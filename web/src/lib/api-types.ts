@@ -93,6 +93,57 @@ export interface paths {
         patch: operations["updateKey"];
         trace?: never;
     };
+    "/admin/usage/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Totals, cache outcomes, provider health and a breakdown by day, model or key for a range of UTC days */
+        get: operations["usageSummary"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/usage/requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The request log, newest first, with the attempts each request made */
+        get: operations["usageRequests"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/usage/export.csv": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One CSV row per day, key and model, with exact dollar amounts */
+        get: operations["usageExport"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -156,6 +207,152 @@ export interface components {
             semantic_cache?: boolean;
             cache_nonzero_temp?: boolean;
         };
+        Attempt: {
+            provider: string;
+            model: string;
+            /** @enum {string} */
+            kind: "primary" | "retry" | "fallback" | "hedge" | "skipped";
+            latency_ms: number;
+            status?: number;
+            error?: string;
+            error_kind?: string;
+            injected?: boolean;
+            estimated?: boolean;
+        };
+        CacheSplit: {
+            /** Format: int64 */
+            miss: number;
+            /** Format: int64 */
+            hit_exact: number;
+            /** Format: int64 */
+            hit_semantic: number;
+            /**
+             * Format: int64
+             * @description Not cacheable, or the request never reached the cache
+             */
+            bypass: number;
+        };
+        UsageTotals: {
+            /** Format: int64 */
+            requests: number;
+            /** Format: int64 */
+            input_tokens: number;
+            /** Format: int64 */
+            output_tokens: number;
+            /** @description Dollars with six decimals */
+            cost_usd: string;
+            /** @description What cache hits avoided spending */
+            saved_usd: string;
+            /** @description saved / (spent + saved) */
+            saved_share: number;
+            /** Format: int64 */
+            cache_hits: number;
+            /**
+             * Format: int64
+             * @description Requests every provider failed
+             */
+            errors: number;
+            /**
+             * Format: int64
+             * @description Refused by a rate limit or a budget
+             */
+            rejected: number;
+            cache: components["schemas"]["CacheSplit"];
+        };
+        UsageGroup: {
+            /** @description The day, the model id, or the key id */
+            key: string;
+            label: string;
+            /** Format: int64 */
+            requests: number;
+            /** Format: int64 */
+            input_tokens: number;
+            /** Format: int64 */
+            output_tokens: number;
+            cost_usd: string;
+            saved_usd: string;
+            /** Format: int64 */
+            cache_hits: number;
+            /** Format: int64 */
+            errors: number;
+            /**
+             * Format: int64
+             * @description Successful requests not served from a cache, which the latency figures use
+             */
+            timed_requests: number;
+            /** @description Model groups only */
+            p50_ms: number | null;
+            /** @description Model groups only */
+            p95_ms: number | null;
+            /** @description Day groups only: that day's cost per model */
+            models?: {
+                [key: string]: string;
+            };
+        };
+        ProviderHealth: {
+            name: string;
+            /** @enum {string} */
+            state: "closed" | "open" | "half_open" | "not_configured";
+            open_remaining_seconds: number | null;
+            reason?: string;
+            /** Format: int64 */
+            failed_attempts: number;
+            /** Format: int64 */
+            fallbacks_to: number;
+        };
+        /** @description Time spent in Spillway itself, not the upstream call. Covers requests since the service started, for all keys. */
+        AddedLatency: {
+            p50_ms: number;
+            p95_ms: number;
+            p99_ms: number;
+            /** Format: int64 */
+            samples: number;
+            /** Format: date-time */
+            since: string;
+        };
+        UsageSummary: {
+            range: {
+                /** Format: date */
+                from: string;
+                /** Format: date */
+                to: string;
+                days: number;
+            };
+            /** @enum {string} */
+            group_by: "day" | "model" | "key";
+            totals: components["schemas"]["UsageTotals"];
+            added_latency: components["schemas"]["AddedLatency"] | null;
+            providers: components["schemas"]["ProviderHealth"][];
+            /** Format: int64 */
+            fallbacks_fired: number;
+            groups: components["schemas"]["UsageGroup"][];
+        };
+        RequestLogRow: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            key_id: string | null;
+            key_name: string;
+            policy: string;
+            provider: string;
+            model: string;
+            input_tokens: number;
+            output_tokens: number;
+            cost_usd: string;
+            saved_usd: string;
+            latency_ms: number;
+            ttfb_ms: number | null;
+            /** @enum {string} */
+            cache_status: "miss" | "hit_exact" | "hit_semantic" | "bypass";
+            outcome: string;
+            attempts: components["schemas"]["Attempt"][];
+            /** Format: date-time */
+            created_at: string;
+        };
+        RequestPage: {
+            requests: components["schemas"]["RequestLogRow"][];
+            next_cursor: string | null;
+        };
         Status: {
             /** @enum {string} */
             postgres: "up" | "down" | "unknown";
@@ -210,7 +407,14 @@ export interface components {
             };
         };
     };
-    parameters: never;
+    parameters: {
+        /** @description First UTC day, inclusive (YYYY-MM-DD). Default: 13 days before `to`. */
+        From: string;
+        /** @description Last UTC day, inclusive (YYYY-MM-DD). Default: today. */
+        To: string;
+        /** @description Only this key */
+        KeyId: string;
+    };
     requestBodies: never;
     headers: never;
     pathItems: never;
@@ -443,6 +647,99 @@ export interface operations {
                     "application/json": components["schemas"]["Error"];
                 };
             };
+        };
+    };
+    usageSummary: {
+        parameters: {
+            query?: {
+                /** @description First UTC day, inclusive (YYYY-MM-DD). Default: 13 days before `to`. */
+                from?: components["parameters"]["From"];
+                /** @description Last UTC day, inclusive (YYYY-MM-DD). Default: today. */
+                to?: components["parameters"]["To"];
+                /** @description Only this key */
+                key_id?: components["parameters"]["KeyId"];
+                group_by?: "day" | "model" | "key";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The report */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UsageSummary"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    usageRequests: {
+        parameters: {
+            query?: {
+                /** @description First UTC day, inclusive (YYYY-MM-DD). Default: 13 days before `to`. */
+                from?: components["parameters"]["From"];
+                /** @description Last UTC day, inclusive (YYYY-MM-DD). Default: today. */
+                to?: components["parameters"]["To"];
+                /** @description Only this key */
+                key_id?: components["parameters"]["KeyId"];
+                model?: string;
+                outcome?: string;
+                policy?: string;
+                limit?: number;
+                cursor?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RequestPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    usageExport: {
+        parameters: {
+            query?: {
+                /** @description First UTC day, inclusive (YYYY-MM-DD). Default: 13 days before `to`. */
+                from?: components["parameters"]["From"];
+                /** @description Last UTC day, inclusive (YYYY-MM-DD). Default: today. */
+                to?: components["parameters"]["To"];
+                /** @description Only this key */
+                key_id?: components["parameters"]["KeyId"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A CSV file */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/csv": string;
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
         };
     };
 }

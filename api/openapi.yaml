@@ -164,7 +164,77 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /admin/usage/summary:
+    get:
+      operationId: usageSummary
+      summary: Totals, cache outcomes, provider health and a breakdown by day, model or key for a range of UTC days
+      x-access: viewer
+      security: [{ bearer: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/From" }
+        - { $ref: "#/components/parameters/To" }
+        - { $ref: "#/components/parameters/KeyId" }
+        - name: group_by
+          in: query
+          required: false
+          schema: { type: string, enum: [day, model, key], default: day }
+      responses:
+        "200":
+          description: The report
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UsageSummary" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /admin/usage/requests:
+    get:
+      operationId: usageRequests
+      summary: The request log, newest first, with the attempts each request made
+      x-access: viewer
+      security: [{ bearer: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/From" }
+        - { $ref: "#/components/parameters/To" }
+        - { $ref: "#/components/parameters/KeyId" }
+        - { name: model, in: query, required: false, schema: { type: string } }
+        - { name: outcome, in: query, required: false, schema: { type: string } }
+        - { name: policy, in: query, required: false, schema: { type: string } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+        - { name: cursor, in: query, required: false, schema: { type: string } }
+      responses:
+        "200":
+          description: One page
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RequestPage" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /admin/usage/export.csv:
+    get:
+      operationId: usageExport
+      summary: One CSV row per day, key and model, with exact dollar amounts
+      x-access: viewer
+      security: [{ bearer: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/From" }
+        - { $ref: "#/components/parameters/To" }
+        - { $ref: "#/components/parameters/KeyId" }
+      responses:
+        "200":
+          description: A CSV file
+          content:
+            text/csv:
+              schema: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 components:
+  parameters:
+    From:
+      { name: from, in: query, required: false, description: "First UTC day, inclusive (YYYY-MM-DD). Default: 13 days before `to`.", schema: { type: string, format: date } }
+    To:
+      { name: to, in: query, required: false, description: "Last UTC day, inclusive (YYYY-MM-DD). Default: today.", schema: { type: string, format: date } }
+    KeyId:
+      { name: key_id, in: query, required: false, description: Only this key, schema: { type: string, format: uuid } }
   responses:
     BadRequest:
       description: The request is not valid
@@ -259,6 +329,132 @@ components:
           oneOf: [{ type: string }, { type: number }]
         semantic_cache: { type: boolean }
         cache_nonzero_temp: { type: boolean }
+    Attempt:
+      type: object
+      required: [provider, model, kind, latency_ms]
+      properties:
+        provider: { type: string }
+        model: { type: string }
+        kind: { type: string, enum: [primary, retry, fallback, hedge, skipped] }
+        latency_ms: { type: integer }
+        status: { type: integer }
+        error: { type: string }
+        error_kind: { type: string }
+        injected: { type: boolean }
+        estimated: { type: boolean }
+    CacheSplit:
+      type: object
+      required: [miss, hit_exact, hit_semantic, bypass]
+      properties:
+        miss: { type: integer, format: int64 }
+        hit_exact: { type: integer, format: int64 }
+        hit_semantic: { type: integer, format: int64 }
+        bypass: { type: integer, format: int64, description: "Not cacheable, or the request never reached the cache" }
+    UsageTotals:
+      type: object
+      required: [requests, input_tokens, output_tokens, cost_usd, saved_usd, saved_share, cache_hits, errors, rejected, cache]
+      properties:
+        requests: { type: integer, format: int64 }
+        input_tokens: { type: integer, format: int64 }
+        output_tokens: { type: integer, format: int64 }
+        cost_usd: { type: string, description: "Dollars with six decimals" }
+        saved_usd: { type: string, description: "What cache hits avoided spending" }
+        saved_share: { type: number, minimum: 0, maximum: 1, description: "saved / (spent + saved)" }
+        cache_hits: { type: integer, format: int64 }
+        errors: { type: integer, format: int64, description: "Requests every provider failed" }
+        rejected: { type: integer, format: int64, description: "Refused by a rate limit or a budget" }
+        cache: { $ref: "#/components/schemas/CacheSplit" }
+    UsageGroup:
+      type: object
+      required: [key, label, requests, input_tokens, output_tokens, cost_usd, saved_usd, cache_hits, errors, timed_requests, p50_ms, p95_ms]
+      properties:
+        key: { type: string, description: "The day, the model id, or the key id" }
+        label: { type: string }
+        requests: { type: integer, format: int64 }
+        input_tokens: { type: integer, format: int64 }
+        output_tokens: { type: integer, format: int64 }
+        cost_usd: { type: string }
+        saved_usd: { type: string }
+        cache_hits: { type: integer, format: int64 }
+        errors: { type: integer, format: int64 }
+        timed_requests: { type: integer, format: int64, description: "Successful requests not served from a cache, which the latency figures use" }
+        p50_ms: { type: number, nullable: true, description: "Model groups only" }
+        p95_ms: { type: number, nullable: true, description: "Model groups only" }
+        models:
+          type: object
+          description: "Day groups only: that day's cost per model"
+          additionalProperties: { type: string }
+    ProviderHealth:
+      type: object
+      required: [name, state, open_remaining_seconds, failed_attempts, fallbacks_to]
+      properties:
+        name: { type: string }
+        state: { type: string, enum: [closed, open, half_open, not_configured] }
+        open_remaining_seconds: { type: integer, nullable: true }
+        reason: { type: string }
+        failed_attempts: { type: integer, format: int64 }
+        fallbacks_to: { type: integer, format: int64 }
+    AddedLatency:
+      type: object
+      required: [p50_ms, p95_ms, p99_ms, samples, since]
+      description: "Time spent in Spillway itself, not the upstream call. Covers requests since the service started, for all keys."
+      properties:
+        p50_ms: { type: number }
+        p95_ms: { type: number }
+        p99_ms: { type: number }
+        samples: { type: integer, format: int64 }
+        since: { type: string, format: date-time }
+    UsageSummary:
+      type: object
+      required: [range, group_by, totals, added_latency, providers, fallbacks_fired, groups]
+      properties:
+        range:
+          type: object
+          required: [from, to, days]
+          properties:
+            from: { type: string, format: date }
+            to: { type: string, format: date }
+            days: { type: integer }
+        group_by: { type: string, enum: [day, model, key] }
+        totals: { $ref: "#/components/schemas/UsageTotals" }
+        added_latency: { allOf: [{ $ref: "#/components/schemas/AddedLatency" }], nullable: true }
+        providers:
+          type: array
+          items: { $ref: "#/components/schemas/ProviderHealth" }
+        fallbacks_fired: { type: integer, format: int64 }
+        groups:
+          type: array
+          items: { $ref: "#/components/schemas/UsageGroup" }
+    RequestLogRow:
+      type: object
+      required: [id, key_id, key_name, policy, provider, model, input_tokens, output_tokens, cost_usd, saved_usd, latency_ms, ttfb_ms, cache_status, outcome, attempts, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        key_id: { type: string, format: uuid, nullable: true }
+        key_name: { type: string }
+        policy: { type: string }
+        provider: { type: string }
+        model: { type: string }
+        input_tokens: { type: integer }
+        output_tokens: { type: integer }
+        cost_usd: { type: string }
+        saved_usd: { type: string }
+        latency_ms: { type: integer }
+        ttfb_ms: { type: integer, nullable: true }
+        cache_status: { type: string, enum: [miss, hit_exact, hit_semantic, bypass] }
+        outcome: { type: string }
+        attempts:
+          type: array
+          items: { $ref: "#/components/schemas/Attempt" }
+        created_at: { type: string, format: date-time }
+    RequestPage:
+      type: object
+      required: [requests, next_cursor]
+      properties:
+        requests:
+          type: array
+          items: { $ref: "#/components/schemas/RequestLogRow" }
+        next_cursor: { type: string, nullable: true }
     Status:
       type: object
       required: [postgres, redis]

@@ -123,7 +123,7 @@ func serve(ctx context.Context, args []string, getenv func(string) string, errOu
 			if err := seedUsers(ctx, pg.Pool, getenv, false, log); err != nil {
 				return fmt.Errorf("seed users: %w", err)
 			}
-			admin = api.NewAdmin(api.AdminDeps{Users: auth.NewUsers(pg.Pool, auth.DefaultParams), Keys: keys.NewStore(pg.Pool), Signer: signer, Deps: deps, Log: log})
+			admin = api.NewAdmin(api.AdminDeps{Users: auth.NewUsers(pg.Pool, auth.DefaultParams), Keys: keys.NewStore(pg.Pool), Usage: usage.NewReader(pg.Pool), Health: gw.ProviderHealth, Latency: metrics, Signer: signer, Deps: deps, Log: log})
 		}
 
 		ln, err := net.Listen("tcp", cfg.Addr)

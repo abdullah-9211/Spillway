@@ -115,3 +115,22 @@ func TestBreakersAreIndependent(t *testing.T) {
 		t.Errorf("a should be unavailable and b available: %v", s.States())
 	}
 }
+
+func TestOpenRemainingCountsDown(t *testing.T) {
+	b, c := newTestBreaker()
+	if b.OpenRemaining() != 0 {
+		t.Error("a closed breaker is not waiting")
+	}
+	fail(b, 5)
+	if got := b.OpenRemaining(); got != 30*time.Second {
+		t.Errorf("just opened: %v", got)
+	}
+	c.advance(9 * time.Second)
+	if got := b.OpenRemaining(); got != 21*time.Second {
+		t.Errorf("after 9s: %v", got)
+	}
+	c.advance(21 * time.Second)
+	if b.OpenRemaining() != 0 {
+		t.Error("half-open is not waiting any more")
+	}
+}

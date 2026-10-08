@@ -133,6 +133,17 @@ func (b *Breaker) Record(success bool) {
 	// While open, results of requests that were already in flight are ignored.
 }
 
+// OpenRemaining is how much longer an open breaker waits before it admits a probe; zero when it is not open.
+func (b *Breaker) OpenRemaining() time.Duration {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.tick()
+	if b.state != BreakerOpen {
+		return 0
+	}
+	return max(b.cfg.OpenFor-b.now().Sub(b.openedAt), 0)
+}
+
 // Release gives back a probe slot when the attempt ended without saying anything about the provider's
 // health (the client cancelled, or the request itself was bad).
 func (b *Breaker) Release() {

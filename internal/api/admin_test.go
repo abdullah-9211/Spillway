@@ -38,6 +38,7 @@ func mustHash(t *testing.T, pw string) string {
 }
 
 type adminRig struct {
+	usage *fakeUsage
 	keys  *memKeys
 	admin *Admin
 	srv   *httptest.Server
@@ -56,9 +57,10 @@ func newAdminRig(t *testing.T) *adminRig {
 		"viewer": {ID: uuid.New(), Username: "viewer", Hash: mustHash(t, "viewer-password"), Role: auth.RoleViewer},
 	}
 	mk := newMemKeys()
-	a := NewAdmin(AdminDeps{Users: users, Keys: mk, Signer: signer, DummyHashParams: testHashParams, Deps: []Dependency{
+	fu := &fakeUsage{}
+	a := NewAdmin(AdminDeps{Users: users, Keys: mk, Usage: fu, Health: testHealth, Latency: fakeLatency{ok: true}, Signer: signer, DummyHashParams: testHashParams, Deps: []Dependency{
 		{Checker: fakeDep{"postgres", nil}, Required: true}, {Checker: fakeDep{"redis", io.ErrClosedPipe}, Required: false}}})
-	r := &adminRig{admin: a, now: &now, keys: mk}
+	r := &adminRig{admin: a, now: &now, keys: mk, usage: fu}
 	r.srv = httptest.NewServer(NewHandler(Options{Admin: a}))
 	t.Cleanup(r.srv.Close)
 	return r
@@ -289,7 +291,7 @@ func TestRoleMatrixFromTheRouter(t *testing.T) {
 	viewer := r.token(t, "viewer", "viewer-password")
 
 	routes := r.admin.Routes()
-	if len(routes) < 9 {
+	if len(routes) < 12 {
 		t.Fatalf("expected the real routes plus the two above, got %v", routes)
 	}
 	// "allowed" means the request got past the session and role checks: whatever the handler then says about a
@@ -340,6 +342,7 @@ func TestProductionRoutesAreAllDeclared(t *testing.T) {
 	sort.Strings(got)
 	want := []string{
 		"DELETE /admin/keys/{id} admin", "GET /admin/keys viewer", "GET /admin/me viewer", "GET /admin/status viewer",
+		"GET /admin/usage/export.csv viewer", "GET /admin/usage/requests viewer", "GET /admin/usage/summary viewer",
 		"PATCH /admin/keys/{id} admin", "POST /admin/keys admin", "POST /admin/login public",
 	}
 	if strings.Join(got, "|") != strings.Join(want, "|") {

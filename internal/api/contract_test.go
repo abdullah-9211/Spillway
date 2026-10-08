@@ -103,6 +103,14 @@ func TestResponsesMatchTheOpenAPISchema(t *testing.T) {
 		{"update revoked key", "PATCH", "/admin/keys/" + keyID, admin, `{"name":"x"}`, nil, 409},
 		{"revoke unknown key", "DELETE", "/admin/keys/" + uuid.NewString(), admin, "", nil, 404},
 		{"revoke as viewer", "DELETE", "/admin/keys/" + keyID, viewer, "", nil, 403},
+		{"usage by day", "GET", "/admin/usage/summary?from=2026-10-01&to=2026-10-08", viewer, "", nil, 200},
+		{"usage by model", "GET", "/admin/usage/summary?group_by=model", viewer, "", nil, 200},
+		{"usage by key", "GET", "/admin/usage/summary?group_by=key&key_id=" + uuid.NewString(), viewer, "", nil, 200},
+		{"usage bad group", "GET", "/admin/usage/summary?group_by=planet", viewer, "", nil, 400},
+		{"usage without a token", "GET", "/admin/usage/summary", "", "", nil, 401},
+		{"request log", "GET", "/admin/usage/requests?limit=10", viewer, "", nil, 200},
+		{"request log bad cursor", "GET", "/admin/usage/requests?cursor=bad", viewer, "", nil, 400},
+		{"csv export", "GET", "/admin/usage/export.csv", viewer, "", nil, 200},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
