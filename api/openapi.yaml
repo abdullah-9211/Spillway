@@ -1,0 +1,277 @@
+openapi: 3.0.3
+info:
+  title: Spillway admin API
+  version: 0.4.0
+  description: |
+    The API behind the dashboard. Its only caller is the dashboard's server-side layer, which signs users in
+    with POST /admin/login and forwards the returned token as `Authorization: Bearer <token>`. The browser
+    never sees the token. TypeScript types for web/ are generated from this file, and a Go test checks that
+    the real responses match it.
+
+    Each operation says which roles may call it with `x-access`: `public`, `viewer` (any signed-in user)
+    or `admin`. The Go router registers the same access level, and a test fails if they disagree.
+paths:
+  /admin/login:
+    post:
+      operationId: login
+      summary: Sign in with a username and password
+      x-access: public
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200":
+          description: Signed in
+          headers:
+            Cache-Control: { schema: { type: string }, description: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoginResponse" }
+        "400":
+          description: The body was not a username and a password
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: The username or password is wrong. The answer is the same for an unknown user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Five failed sign-ins in a minute for this address or username
+          headers:
+            Retry-After: { schema: { type: integer, minimum: 1 }, description: Seconds until the next try is allowed }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /admin/me:
+    get:
+      operationId: me
+      summary: The signed-in user and their role
+      x-access: viewer
+      security: [{ bearer: [] }]
+      responses:
+        "200":
+          description: The user the token belongs to
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401":
+          description: No token, a bad token, or an expired one (`session_expired`)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /admin/status:
+    get:
+      operationId: status
+      summary: Whether Spillway's dependencies are reachable
+      x-access: viewer
+      security: [{ bearer: [] }]
+      responses:
+        "200":
+          description: Dependency status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Status" }
+        "401":
+          description: No token, a bad token, or an expired one
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /admin/keys:
+    get:
+      operationId: listKeys
+      summary: Every key with its limits and this month's spend. Never the key itself.
+      x-access: viewer
+      security: [{ bearer: [] }]
+      responses:
+        "200":
+          description: Active keys first, then revoked ones
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [keys]
+                properties:
+                  keys:
+                    type: array
+                    items: { $ref: "#/components/schemas/ApiKey" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      operationId: createKey
+      summary: Create a key. The full key is in the response once and can never be shown again.
+      x-access: admin
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/KeyCreate" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreatedKey" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /admin/keys/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      operationId: updateKey
+      summary: Change a key's name, limits or cache settings. A field left out is unchanged; null removes a limit.
+      x-access: admin
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/KeyUpdate" }
+      responses:
+        "200":
+          description: The key after the change
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiKey" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The key is revoked and cannot be changed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    delete:
+      operationId: revokeKey
+      summary: Revoke a key. The gateway rejects it from the next request. Revoking twice changes nothing.
+      x-access: admin
+      security: [{ bearer: [] }]
+      responses:
+        "200":
+          description: The revoked key
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiKey" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+components:
+  responses:
+    BadRequest:
+      description: The request is not valid
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: No token, a bad token, or an expired one
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: The signed-in user is a viewer and this needs an admin
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: No such resource
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+  schemas:
+    Role:
+      type: string
+      enum: [admin, viewer]
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string, minLength: 1 }
+        password: { type: string, minLength: 1 }
+    User:
+      type: object
+      required: [username, role]
+      properties:
+        username: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+    LoginResponse:
+      type: object
+      required: [token, expires_at, user]
+      properties:
+        token: { type: string }
+        expires_at: { type: string, format: date-time }
+        user: { $ref: "#/components/schemas/User" }
+    ApiKey:
+      type: object
+      required: [id, name, prefix, rate_limit_rpm, monthly_budget_usd, spend_usd, semantic_cache, cache_nonzero_temp, created_at, revoked_at, last_used_at, builtin]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        prefix: { type: string, description: "The first characters of the key, for recognising it. Never enough to use it." }
+        rate_limit_rpm: { type: integer, nullable: true, description: "Requests a minute; null means no limit" }
+        monthly_budget_usd: { type: string, nullable: true, description: "Dollars with six decimals, for example \"30.000000\"; null means no limit" }
+        spend_usd: { type: string, description: "This calendar month (UTC), dollars with six decimals" }
+        semantic_cache: { type: boolean }
+        cache_nonzero_temp: { type: boolean }
+        created_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time, nullable: true }
+        last_used_at: { type: string, format: date-time, nullable: true }
+        builtin: { type: boolean, description: "The dashboard's own playground key, which cannot be changed here" }
+    CreatedKey:
+      type: object
+      required: [key, secret]
+      properties:
+        key: { $ref: "#/components/schemas/ApiKey" }
+        secret: { type: string, description: "The full key. Shown once; only a hash is stored." }
+    KeyCreate:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 64 }
+        rate_limit_rpm: { type: integer, minimum: 1, maximum: 1000000, nullable: true }
+        monthly_budget_usd:
+          description: Dollars, as a string or a number. Null or left out means no limit.
+          nullable: true
+          oneOf: [{ type: string }, { type: number }]
+        semantic_cache: { type: boolean }
+        cache_nonzero_temp: { type: boolean }
+    KeyUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 64 }
+        rate_limit_rpm: { type: integer, minimum: 1, maximum: 1000000, nullable: true }
+        monthly_budget_usd:
+          nullable: true
+          oneOf: [{ type: string }, { type: number }]
+        semantic_cache: { type: boolean }
+        cache_nonzero_temp: { type: boolean }
+    Status:
+      type: object
+      required: [postgres, redis]
+      properties:
+        postgres: { type: string, enum: [up, down, unknown] }
+        redis: { type: string, enum: [up, down, disabled], description: "disabled means REDIS_URL is not set" }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }

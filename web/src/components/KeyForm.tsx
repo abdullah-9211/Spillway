@@ -1,0 +1,96 @@
+"use client";
+
+import { useState, type FormEvent } from "react";
+import { emptyForm, validateKeyForm, type KeyFormValues } from "@/lib/format";
+import { Button } from "./ui";
+
+function Err({ id, text }: { id: string; text?: string }) {
+  return text ? (
+    <p id={id} className="field-err">
+      {text}
+    </p>
+  ) : null;
+}
+
+/** The create and edit form. Empty limits mean "no limit". The server checks everything again. */
+export function KeyForm({
+  initial = emptyForm,
+  submitLabel,
+  pending,
+  error,
+  onSubmit,
+  onCancel,
+}: {
+  initial?: KeyFormValues;
+  submitLabel: string;
+  pending: boolean;
+  error: string | null;
+  onSubmit: (v: KeyFormValues) => void;
+  onCancel?: () => void;
+}) {
+  const [v, setV] = useState<KeyFormValues>(initial);
+  const [shown, setShown] = useState<ReturnType<typeof validateKeyForm>>({});
+
+  function submit(e: FormEvent) {
+    e.preventDefault();
+    const errs = validateKeyForm(v);
+    setShown(errs);
+    if (Object.keys(errs).length === 0) onSubmit(v);
+  }
+
+  return (
+    <form onSubmit={submit} className="kform" noValidate>
+      <div>
+        <label className="lab" htmlFor="key-name">Name</label>
+        <input id="key-name" className="inp" type="text" placeholder="For example, ci-pipeline" value={v.name}
+          onChange={(e) => setV({ ...v, name: e.target.value })} aria-invalid={!!shown.name} aria-describedby={shown.name ? "key-name-err" : undefined} />
+        <Err id="key-name-err" text={shown.name} />
+      </div>
+      <div className="kform__two">
+        <div>
+          <label className="lab" htmlFor="key-rpm">Requests a minute</label>
+          <input id="key-rpm" className="inp num" type="text" inputMode="numeric" placeholder="No limit" value={v.rpm}
+            onChange={(e) => setV({ ...v, rpm: e.target.value })} aria-invalid={!!shown.rpm} aria-describedby={shown.rpm ? "key-rpm-err" : undefined} />
+        </div>
+        <div>
+          <label className="lab" htmlFor="key-budget">Monthly budget (USD)</label>
+          <input id="key-budget" className="inp num" type="text" inputMode="decimal" placeholder="No limit" value={v.budget}
+            onChange={(e) => setV({ ...v, budget: e.target.value })} aria-invalid={!!shown.budget} aria-describedby={shown.budget ? "key-budget-err" : undefined} />
+        </div>
+      </div>
+      <Err id="key-rpm-err" text={shown.rpm} />
+      <Err id="key-budget-err" text={shown.budget} />
+      <label className="chk">
+        <input type="checkbox" checked={v.semanticCache} onChange={(e) => setV({ ...v, semanticCache: e.target.checked })} />
+        <span>
+          Use the semantic cache
+          <br />
+          <span className="small">Returns saved answers for near-identical questions.</span>
+        </span>
+      </label>
+      <label className="chk">
+        <input type="checkbox" checked={v.cacheNonzeroTemp} onChange={(e) => setV({ ...v, cacheNonzeroTemp: e.target.checked })} />
+        <span>
+          Cache answers above temperature 0
+          <br />
+          <span className="small">Off by default, because those answers can vary.</span>
+        </span>
+      </label>
+      {error && (
+        <div className="err" role="alert">
+          <span>{error}</span>
+        </div>
+      )}
+      <div className="kform__actions">
+        <Button type="submit" variant="primary" disabled={pending}>
+          {pending ? "Saving…" : submitLabel}
+        </Button>
+        {onCancel && (
+          <Button type="button" onClick={onCancel} disabled={pending}>
+            Cancel
+          </Button>
+        )}
+      </div>
+    </form>
+  );
+}

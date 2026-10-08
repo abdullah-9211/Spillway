@@ -1,0 +1,62 @@
+# Model catalog and routing policies. Prices are USD per million tokens and are PLACEHOLDERS (0.00) until
+# filled with current provider prices, so cost shows as $0 until then. Check each `upstream` id against
+# your provider account too.
+#
+# To try Spillway without real keys, run `go run ./cmd/fakeprovider` and set base_url on a provider:
+#   openai: { api_key_env: OPENAI_API_KEY, base_url: http://localhost:9999/v1 }
+providers:
+  anthropic: { api_key_env: ANTHROPIC_API_KEY }
+  openai:    { api_key_env: OPENAI_API_KEY }
+  google:    { api_key_env: GOOGLE_API_KEY }
+  ollama:    { base_url: http://localhost:11434/v1, embed_model: nomic-embed-text }
+
+models:
+  - id: sonnet
+    provider: anthropic
+    upstream: claude-sonnet-5-5
+    input_usd_per_mtok: 0.00   # fill in
+    output_usd_per_mtok: 0.00  # fill in
+    context_window: 200000
+    tags: [reasoning, long-context]
+  - id: haiku
+    provider: anthropic
+    upstream: claude-haiku-4-5-20251001
+    input_usd_per_mtok: 0.00   # fill in
+    output_usd_per_mtok: 0.00  # fill in
+    context_window: 200000
+    tags: [fast]
+  - id: mini
+    provider: openai
+    upstream: gpt-4o-mini
+    input_usd_per_mtok: 0.00   # fill in
+    output_usd_per_mtok: 0.00  # fill in
+    context_window: 128000
+    tags: [fast]
+  - id: flash
+    provider: google
+    upstream: gemini-2.5-flash
+    input_usd_per_mtok: 0.00   # fill in
+    output_usd_per_mtok: 0.00  # fill in
+    context_window: 1000000
+    tags: [fast, long-context]
+  - id: local
+    provider: ollama
+    upstream: llama3.2
+    input_usd_per_mtok: 0
+    output_usd_per_mtok: 0
+    context_window: 32000
+    tags: [fast, free]
+
+# fixed: one model (optionally with a `fallback:` list). fallback: an ordered chain.
+# cheapest: models carrying `tag`, cheapest estimated cost first. weighted: A/B split (send X-Spillway-Bucket
+# to keep one user on one arm). hedge_after_ms (non-streaming only): start the next model in parallel if
+# the first has not answered by then.
+policies:
+  - { name: default,    type: fallback, models: [sonnet, mini, local] }
+  - { name: cheap-fast, type: cheapest, tag: fast }
+  - { name: ab-test,    type: weighted, arms: [{ model: sonnet, weight: 50 }, { model: mini, weight: 50 }] }
+  - { name: hedged,     type: fallback, models: [mini, sonnet], hedge_after_ms: 2000 }
+
+gateway: { request_timeout: 60s, first_byte_timeout: 15s, idle_timeout: 30s, max_total_ms: 120000, max_retries: 2 }
+breaker: { consecutive_failures: 5, error_rate: 0.5, window: 20, open_for: 30s }
+cache: { exact_ttl: 24h, scope: key, semantic_threshold: 0.95 }
