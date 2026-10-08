@@ -354,3 +354,57 @@ func (s *Store) RevokeByID(ctx context.Context, id uuid.UUID) (Key, error) {
 	}
 	return s.Get(ctx, id)
 }
+
+// EnsureBuiltin makes sure the dashboard's playground key exists with the configured limits. Nobody holds its secret:
+// its hash comes from random bytes that are thrown away, so it cannot be used from outside; the playground calls
+// the gateway with it directly. Limits from the config replace whatever is stored, so editing the file takes effect.
+func (s *Store) EnsureBuiltin(ctx context.Context, rpm *int, budget *money.Micros) (Key, error) {
+	if err := ValidateLimits(rpm, budget); err != nil {
+		return Key{}, err
+	}
+	row, err := s.q.GetAPIKeyByName(ctx, BuiltinName)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		id, err := uuid.NewV7()
+		if err != nil {
+			return Key{}, err
+		}
+		secret, hash, err := Generate()
+		if err != nil {
+			return Key{}, err
+		}
+		arg := sqlcgen.CreateAPIKeyParams{ID: id, Name: BuiltinName, KeyPrefix: "spw_play", KeyHash: hash, MonthlyBudgetUsd: db.NullNumericFromMicros(budget)}
+		_ = secret // discarded on purpose
+		if rpm != nil {
+			arg.RateLimitRpm = pgtype.Int4{Int32: int32(*rpm), Valid: true}
+		}
+		if _, err := s.q.CreateAPIKey(ctx, arg); err != nil {
+			return Key{}, fmt.Errorf("create playground key: %w", err)
+		}
+		return s.Get(ctx, id)
+	case err != nil:
+		return Key{}, fmt.Errorf("find playground key: %w", err)
+	}
+	arg := sqlcgen.SetAPIKeyLimitsParams{ID: row.ID, MonthlyBudgetUsd: db.NullNumericFromMicros(budget)}
+	if rpm != nil {
+		arg.RateLimitRpm = pgtype.Int4{Int32: int32(*rpm), Valid: true}
+	}
+	if err := s.q.SetAPIKeyLimits(ctx, arg); err != nil {
+		return Key{}, fmt.Errorf("update playground key: %w", err)
+	}
+	return s.Get(ctx, row.ID)
+}
+
+// Stats returns one key with this month's spend.
+func (s *Store) Stats(ctx context.Context, id uuid.UUID, now time.Time) (Stats, error) {
+	all, err := s.ListWithStats(ctx, now)
+	if err != nil {
+		return Stats{}, err
+	}
+	for _, st := range all {
+		if st.ID == id {
+			return st, nil
+		}
+	}
+	return Stats{}, ErrNotFound
+}

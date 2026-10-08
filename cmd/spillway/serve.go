@@ -16,6 +16,7 @@ import (
 	"github.com/abdullah-9211/spillway/internal/db/sqlcgen"
 	"github.com/abdullah-9211/spillway/internal/gateway"
 	"github.com/abdullah-9211/spillway/internal/keys"
+	"github.com/abdullah-9211/spillway/internal/playground"
 	"github.com/abdullah-9211/spillway/internal/provider"
 	"github.com/abdullah-9211/spillway/internal/telemetry"
 	"github.com/abdullah-9211/spillway/internal/usage"
@@ -91,9 +92,10 @@ func serve(ctx context.Context, args []string, getenv func(string) string, errOu
 			return out
 		})
 		opts := gateway.Options{
-			Spend:    gateway.NewPGSpend(sqlcgen.New(pg.Pool)),
-			Semantic: gateway.NewPGSemantic(pg.Pool),
-			Observer: metrics,
+			FaultInjection: cat.Playground.FaultInjection,
+			Spend:          gateway.NewPGSpend(sqlcgen.New(pg.Pool)),
+			Semantic:       gateway.NewPGSemantic(pg.Pool),
+			Observer:       metrics,
 		}
 		if rdb != nil {
 			opts.Limiter = gateway.NewRedisLimiter(rdb.Client)
@@ -123,7 +125,16 @@ func serve(ctx context.Context, args []string, getenv func(string) string, errOu
 			if err := seedUsers(ctx, pg.Pool, getenv, false, log); err != nil {
 				return fmt.Errorf("seed users: %w", err)
 			}
-			admin = api.NewAdmin(api.AdminDeps{Users: auth.NewUsers(pg.Pool, auth.DefaultParams), Keys: keys.NewStore(pg.Pool), Usage: usage.NewReader(pg.Pool), Health: gw.ProviderHealth, Latency: metrics, Signer: signer, Deps: deps, Log: log})
+			keyStore := keys.NewStore(pg.Pool)
+			budget, rpm := cat.Playground.Budget, cat.Playground.RateLimitRPM
+			pkey, err := keyStore.EnsureBuiltin(ctx, &rpm, &budget)
+			if err != nil {
+				return err
+			}
+			pg_ := playground.NewService(gw, func(context.Context) (keys.Key, error) { return pkey, nil }, playground.NewStore(pg.Pool), cat.Playground.FaultInjection, log)
+			admin = api.NewAdmin(api.AdminDeps{Users: auth.NewUsers(pg.Pool, auth.DefaultParams), Keys: keyStore, Usage: usage.NewReader(pg.Pool), Health: gw.ProviderHealth, Latency: metrics,
+				Playground: &api.PlaygroundDeps{Service: pg_, Catalog: gw.Catalog, Key: func(ctx context.Context, now time.Time) (keys.Stats, error) { return keyStore.Stats(ctx, pkey.ID, now) }},
+				Signer:     signer, Deps: deps, Log: log})
 		}
 
 		ln, err := net.Listen("tcp", cfg.Addr)

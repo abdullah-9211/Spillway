@@ -49,6 +49,8 @@ type Options struct {
 	EmbedModel string
 	Observer   Observer
 	Tracer     trace.Tracer
+	// FaultInjection allows the playground key to make providers fail on purpose (config playground.fault_injection).
+	FaultInjection bool
 }
 
 // Gateway resolves a request into a plan, runs it through the executor and records usage.
@@ -61,14 +63,15 @@ type Gateway struct {
 	now      func() time.Time
 	planner  Planner
 
-	limiter    Limiter
-	budgets    *Budgets
-	exact      ExactCache
-	semantic   SemanticCache
-	embedder   provider.Embedder
-	embedModel string
-	obs        Observer
-	tracer     trace.Tracer
+	limiter        Limiter
+	budgets        *Budgets
+	exact          ExactCache
+	semantic       SemanticCache
+	embedder       provider.Embedder
+	embedModel     string
+	obs            Observer
+	tracer         trace.Tracer
+	faultInjection bool
 
 	fills   sync.WaitGroup
 	fillSem chan struct{}
@@ -88,6 +91,7 @@ func New(cat *Catalog, providers map[string]provider.Provider, missing map[strin
 // Use applies options. Call it before serving.
 func (g *Gateway) Use(o Options) {
 	g.limiter, g.exact, g.semantic, g.embedder, g.embedModel = o.Limiter, o.Exact, o.Semantic, o.Embedder, o.EmbedModel
+	g.faultInjection = o.FaultInjection
 	if o.Spend != nil {
 		g.budgets = NewBudgets(o.Spend, 5*time.Second)
 	}
@@ -226,6 +230,8 @@ type Result struct {
 	Saved    money.Micros // what a cache hit avoided
 	Attempts int          // provider calls made, not counting skipped candidates
 	Cache    usage.CacheStatus
+	Trace    []usage.Attempt // every attempt in order, including skipped and failed ones
+	Latency  time.Duration   // from the request arriving to the answer being ready
 }
 
 // call is the state of one request as it moves through the pipeline.
@@ -253,6 +259,7 @@ func (g *Gateway) begin(ctx context.Context, key keys.Key, id uuid.UUID, bucket 
 	if err != nil {
 		return ctx, nil, err
 	}
+	ctx = g.vetFaults(ctx, key)
 	ctx, span := g.tracer.Start(ctx, "gateway.request", trace.WithAttributes(
 		attribute.String("spillway.request_id", id.String()),
 		attribute.String("spillway.policy", plan.Name),
@@ -523,7 +530,7 @@ func (g *Gateway) Chat(ctx context.Context, key keys.Key, id uuid.UUID, bucket s
 		resp.ID, resp.Object, resp.Created, resp.Model = "chatcmpl-"+id.String(), "chat.completion", g.now().Unix(), e.Model
 		zero := money.Micros(0)
 		c.record(finished{outcome: usage.OutcomeOK, cost: &zero, saved: e.Cost, cache: status})
-		return &Result{Response: &resp, Provider: e.Provider, Model: e.Model, Saved: e.Cost, Cache: status}, nil
+		return &Result{Response: &resp, Provider: e.Provider, Model: e.Model, Saved: e.Cost, Cache: status, Latency: g.now().Sub(c.started)}, nil
 	}
 
 	t0 := g.now()
@@ -555,7 +562,7 @@ func (g *Gateway) Chat(ctx context.Context, key keys.Key, id uuid.UUID, bucket s
 	}
 	c.fill(*resp, cost)
 	return &Result{Response: resp, Provider: c.model.Provider, Model: c.model.ID, Cost: cost,
-		Attempts: countAttempts(res.Attempts), Cache: c.cacheStatus}, nil
+		Attempts: countAttempts(res.Attempts), Cache: c.cacheStatus, Trace: res.Attempts, Latency: g.now().Sub(c.started)}, nil
 }
 
 // winnerIndex is the last attempt that did not fail: the one that produced the answer.

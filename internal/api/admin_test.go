@@ -277,7 +277,7 @@ func TestUnknownUserCostsAboutAsMuchAsAWrongPassword(t *testing.T) {
 // --- the role matrix, generated from the router ---
 
 func TestRoleMatrixFromTheRouter(t *testing.T) {
-	r := newAdminRig(t)
+	r, _ := newPlaygroundRig(t)
 	// A write route, standing in for the key, budget, tool and approval endpoints later phases add. The point is
 	// that the matrix below is built from whatever is registered, so those routes are covered the moment they exist.
 	r.admin.handle("POST", "/admin/_matrix/write", AccessAdmin, func(w http.ResponseWriter, _ *http.Request, _ auth.Claims) {
@@ -291,7 +291,7 @@ func TestRoleMatrixFromTheRouter(t *testing.T) {
 	viewer := r.token(t, "viewer", "viewer-password")
 
 	routes := r.admin.Routes()
-	if len(routes) < 12 {
+	if len(routes) < 16 {
 		t.Fatalf("expected the real routes plus the two above, got %v", routes)
 	}
 	// "allowed" means the request got past the session and role checks: whatever the handler then says about a
@@ -334,16 +334,16 @@ func TestRoleMatrixFromTheRouter(t *testing.T) {
 }
 
 func TestProductionRoutesAreAllDeclared(t *testing.T) {
-	r := newAdminRig(t)
+	r, _ := newPlaygroundRig(t)
 	var got []string
 	for _, rt := range r.admin.Routes() {
 		got = append(got, rt.Method+" "+rt.Path+" "+rt.Access.String())
 	}
 	sort.Strings(got)
 	want := []string{
-		"DELETE /admin/keys/{id} admin", "GET /admin/keys viewer", "GET /admin/me viewer", "GET /admin/status viewer",
+		"DELETE /admin/keys/{id} admin", "GET /admin/keys viewer", "GET /admin/me viewer", "GET /admin/models viewer", "GET /admin/playground viewer", "GET /admin/playground/history viewer", "GET /admin/status viewer",
 		"GET /admin/usage/export.csv viewer", "GET /admin/usage/requests viewer", "GET /admin/usage/summary viewer",
-		"PATCH /admin/keys/{id} admin", "POST /admin/keys admin", "POST /admin/login public",
+		"PATCH /admin/keys/{id} admin", "POST /admin/keys admin", "POST /admin/login public", "POST /admin/playground/chat admin",
 	}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Errorf("routes = %v, want %v", got, want)

@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/abdullah-9211/spillway/internal/provider"
+	"github.com/abdullah-9211/spillway/internal/provider/faults"
 	"github.com/abdullah-9211/spillway/internal/usage"
 )
 
@@ -272,13 +273,27 @@ func (e *Executor) runCandidate(ctx context.Context, m Model, firstKind string, 
 	}
 	br := e.breakers.For(m.Provider)
 
+	// A fault asked for by the playground replaces the provider for this request only. It never touches the breaker
+	// or the provider-health metrics, because a failure made on purpose says nothing about the provider.
+	injected := false
+	failsOutright := false
+	quiet := hasFaults(ctx) // a request with faults stays out of the provider metrics, for its real attempts too
+	if f, set, ok := faultFor(ctx, m.Provider); ok {
+		p, injected = faults.Wrap(p, f, set), true
+		failsOutright = f.Kind == faults.RateLimit || f.Kind == faults.ServerError
+	}
+
 	for n := 0; ; n++ {
 		if ctx.Err() != nil {
 			return nil, attempts, ctx.Err(), false
 		}
-		if !br.Allow() {
-			skip("circuit breaker open")
-			return nil, attempts, errors.New("circuit breaker open"), false
+		admitted := false
+		if !failsOutright { // an outright failure makes no real call, so an open breaker has nothing to protect
+			if !br.Allow() {
+				skip("circuit breaker open")
+				return nil, attempts, errors.New("circuit breaker open"), false
+			}
+			admitted = true
 		}
 		kind := firstKind
 		if n > 0 {
@@ -288,14 +303,21 @@ func (e *Executor) runCandidate(ctx context.Context, m Model, firstKind string, 
 		actx, span := e.tracer.Start(ctx, "gateway.attempt", trace.WithAttributes(
 			attribute.String("spillway.provider", m.Provider), attribute.String("spillway.model", m.ID), attribute.String("spillway.attempt_kind", kind)))
 		v, err := try(actx, p, m)
-		a := usage.Attempt{Provider: m.Provider, Model: m.ID, Kind: kind, LatencyMs: int(e.now().Sub(t0).Milliseconds())}
+		a := usage.Attempt{Provider: m.Provider, Model: m.ID, Kind: kind, LatencyMs: int(e.now().Sub(t0).Milliseconds()), Injected: injected}
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
 		}
 		span.End()
 		if err == nil {
-			br.Record(true)
-			e.obs.ObserveAttempt(m.Provider, kind, "")
+			switch {
+			case injected && admitted:
+				br.Release()
+			case !injected:
+				br.Record(true)
+				if !quiet {
+					e.obs.ObserveAttempt(m.Provider, kind, "")
+				}
+			}
 			return v, append(attempts, a), nil, false
 		}
 		k := provider.KindOf(err)
@@ -305,7 +327,17 @@ func (e *Executor) runCandidate(ctx context.Context, m Model, firstKind string, 
 			a.Status = pe.Status
 		}
 		attempts = append(attempts, a)
-		e.obs.ObserveAttempt(m.Provider, kind, a.ErrorKind)
+		if pe != nil && pe.Injected {
+			// Made on purpose: not counted anywhere, not retried (the point is to see the fallback), and the
+			// candidate is given up on at once.
+			if admitted {
+				br.Release()
+			}
+			return nil, attempts, err, false
+		}
+		if !quiet {
+			e.obs.ObserveAttempt(m.Provider, kind, a.ErrorKind)
+		}
 
 		switch k {
 		case provider.KindBadRequest:

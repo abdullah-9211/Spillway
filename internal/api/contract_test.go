@@ -44,7 +44,8 @@ func TestOpenAPIMatchesTheRouter(t *testing.T) {
 			fromSpec = append(fromSpec, method+" "+path+" "+access)
 		}
 	}
-	for _, rt := range newAdminRig(t).admin.Routes() {
+	pr, _ := newPlaygroundRig(t)
+	for _, rt := range pr.admin.Routes() {
 		fromRouter = append(fromRouter, rt.Method+" "+rt.Path+" "+rt.Access.String())
 	}
 	sort.Strings(fromSpec)
@@ -61,7 +62,7 @@ func TestResponsesMatchTheOpenAPISchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := newAdminRig(t)
+	r, _ := newPlaygroundRig(t)
 	admin := r.token(t, "admin", "admin-password")
 	viewer := r.token(t, "viewer", "viewer-password")
 
@@ -113,6 +114,14 @@ func TestResponsesMatchTheOpenAPISchema(t *testing.T) {
 		{"request log", "GET", "/admin/usage/requests?limit=10", viewer, "", nil, 200},
 		{"request log bad cursor", "GET", "/admin/usage/requests?cursor=bad", viewer, "", nil, 400},
 		{"csv export", "GET", "/admin/usage/export.csv", viewer, "", nil, 200},
+		{"models", "GET", "/admin/models", viewer, "", nil, 200},
+		{"playground state", "GET", "/admin/playground", viewer, "", nil, 200},
+		{"playground history", "GET", "/admin/playground/history?limit=5", viewer, "", nil, 200},
+		{"playground history bad cursor", "GET", "/admin/playground/history?limit=zero", viewer, "", nil, 400},
+		{"playground chat", "POST", "/admin/playground/chat", admin, `{"policy":"hedged","prompt":"hi","faults":[{"provider":"anthropic","kind":"rate_limit"}]}`, nil, 200},
+		{"playground chat invalid", "POST", "/admin/playground/chat", admin, `{"prompt":"x","bogus":true}`, nil, 400},
+		{"playground chat as viewer", "POST", "/admin/playground/chat", viewer, `{"prompt":"x"}`, nil, 403},
+		{"playground without a token", "GET", "/admin/playground", "", "", nil, 401},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

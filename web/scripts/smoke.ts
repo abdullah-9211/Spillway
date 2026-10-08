@@ -87,6 +87,25 @@ for (const [label, who, role] of [["admin", admin, "admin"], ["viewer", viewer, 
   const csv = await fetch(base + "/api/usage/export?from=2020-01-01&to=2020-01-31", { headers: { cookie } });
   const csvText = await csv.text();
   check(`${label} can export a CSV`, csv.status === 200 && (csv.headers.get("content-type") ?? "").includes("text/csv") && csvText.startsWith("day,key,model,requests"), `status ${csv.status}: ${csvText.slice(0, 60)}`);
+
+  const pg = await fetch(base + "/playground", { headers: { cookie } });
+  const pgHtml = await pg.text();
+  const sendDisabled = /<button[^>]*disabled[^>]*>Send</.test(pgHtml);
+  check(`${label} opens the Playground`, pg.status === 200 && pgHtml.includes("Routing policy") && pgHtml.includes("Recent"), `status ${pg.status}`);
+  check(label === "admin" ? "admin can send a prompt" : "viewer's Send is disabled with the reason shown", label === "admin" ? !sendDisabled : sendDisabled && pgHtml.includes("only admins can"));
+  const chat = await fetch(base + "/api/playground/chat", {
+    method: "POST",
+    headers: { cookie, "content-type": "application/json" },
+    body: JSON.stringify({ policy: "default", prompt: "Say hello", faults: [{ provider: "anthropic", kind: "rate_limit" }] }),
+  });
+  if (label === "viewer") {
+    check("viewer cannot send a playground prompt (403)", chat.status === 403, `status ${chat.status}`);
+  } else {
+    const r = (await chat.json()) as { attempts?: { injected?: boolean }[]; answer?: string };
+    check("admin's injected 429 falls back and still answers", chat.status === 200 && !!r.answer && r.attempts?.[0]?.injected === true && (r.attempts?.length ?? 0) >= 2, `status ${chat.status}`);
+  }
+  const hist = await fetch(base + "/api/playground/history?limit=5", { headers: { cookie } });
+  check(`${label} can read the playground history`, hist.status === 200 && Array.isArray(((await hist.json()) as { requests?: unknown[] }).requests));
 }
 
 const noCsv = await fetch(base + "/api/usage/export", { redirect: "manual" });

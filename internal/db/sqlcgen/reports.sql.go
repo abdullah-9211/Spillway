@@ -360,10 +360,11 @@ const reportProviderAttempts = `-- name: ReportProviderAttempts :many
 SELECT
   COALESCE(a->>'provider', '')::text                   AS provider,
   count(*) FILTER (WHERE COALESCE(a->>'error_kind', '') <> '' AND a->>'kind' <> 'skipped')::bigint AS failed_attempts,
-  count(*) FILTER (WHERE a->>'kind' = 'fallback')::bigint                                          AS fallbacks_to
+  count(*) FILTER (WHERE a->>'kind' = 'fallback'  )::bigint AS fallbacks_to
 FROM usage u, jsonb_array_elements(u.attempts) a
 WHERE u.created_at >= $1 AND u.created_at < $2
   AND ($3::uuid IS NULL OR u.api_key_id = $3::uuid)
+  AND NOT (u.attempts @> '[{"injected": true}]')  -- playground requests with faults say nothing about provider health
 GROUP BY 1
 ORDER BY 1
 `

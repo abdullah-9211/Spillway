@@ -24,6 +24,18 @@ type ApiKey struct {
 	RevokedAt        *time.Time
 }
 
+type PlaygroundHistory struct {
+	ID        uuid.UUID
+	Policy    string
+	Prompt    string
+	System    string
+	Answer    string
+	Stream    bool
+	Faults    []byte
+	Result    []byte
+	CreatedAt time.Time
+}
+
 type SemanticCache struct {
 	ID         uuid.UUID
 	Scope      uuid.UUID

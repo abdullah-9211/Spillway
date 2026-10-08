@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -26,12 +27,13 @@ func (u *usdPerMtok) UnmarshalYAML(n *yaml.Node) error {
 }
 
 type fileConfig struct {
-	Providers map[string]providerConfig `yaml:"providers"`
-	Models    []modelConfig             `yaml:"models"`
-	Policies  []policyConfig            `yaml:"policies"`
-	Gateway   gatewayConfig             `yaml:"gateway"`
-	Breaker   breakerConfig             `yaml:"breaker"`
-	Cache     cacheConfig               `yaml:"cache"`
+	Providers  map[string]providerConfig `yaml:"providers"`
+	Models     []modelConfig             `yaml:"models"`
+	Policies   []policyConfig            `yaml:"policies"`
+	Gateway    gatewayConfig             `yaml:"gateway"`
+	Breaker    breakerConfig             `yaml:"breaker"`
+	Cache      cacheConfig               `yaml:"cache"`
+	Playground playgroundConfig          `yaml:"playground"`
 }
 
 type providerConfig struct {
@@ -73,6 +75,13 @@ type gatewayConfig struct {
 	MaxRetries       *int          `yaml:"max_retries"`
 }
 
+type playgroundConfig struct {
+	Key              string     `yaml:"key"`
+	MonthlyBudgetUSD usdPerMtok `yaml:"monthly_budget_usd"` // read as a dollar amount; the type is shared with prices
+	RateLimitRPM     int        `yaml:"rate_limit_rpm"`
+	FaultInjection   *bool      `yaml:"fault_injection"`
+}
+
 type cacheConfig struct {
 	ExactTTL          time.Duration `yaml:"exact_ttl"`
 	Scope             string        `yaml:"scope"` // key (default) or global
@@ -92,6 +101,13 @@ type Provider struct {
 	APIKeyEnv  string
 	BaseURL    string
 	EmbedModel string
+}
+
+// PlaygroundSettings configure the dashboard's playground and its built-in key.
+type PlaygroundSettings struct {
+	Budget         money.Micros
+	RateLimitRPM   int
+	FaultInjection bool
 }
 
 // CacheSettings configure both caches.
@@ -127,12 +143,13 @@ type Policy struct {
 
 // Catalog is the validated, immutable view of the model catalog file.
 type Catalog struct {
-	Providers map[string]Provider
-	Models    map[string]Model
-	Policies  map[string]Policy
-	Exec      ExecConfig
-	Breaker   BreakerConfig
-	Cache     CacheSettings
+	Providers  map[string]Provider
+	Models     map[string]Model
+	Policies   map[string]Policy
+	Exec       ExecConfig
+	Breaker    BreakerConfig
+	Cache      CacheSettings
+	Playground PlaygroundSettings
 }
 
 var policyTypes = map[string]bool{"fixed": true, "fallback": true, "cheapest": true, "weighted": true}
@@ -155,6 +172,16 @@ func ParseCatalog(raw []byte) (*Catalog, error) {
 		Exec:    execConfigFrom(f.Gateway),
 		Breaker: BreakerConfig(f.Breaker).withDefaults(),
 		Cache:   CacheSettings{TTL: f.Cache.ExactTTL, Threshold: f.Cache.SemanticThreshold, Global: f.Cache.Scope == "global"},
+	}
+	c.Playground = PlaygroundSettings{Budget: money.Micros(f.Playground.MonthlyBudgetUSD), RateLimitRPM: f.Playground.RateLimitRPM, FaultInjection: true}
+	if f.Playground.MonthlyBudgetUSD == 0 {
+		c.Playground.Budget = 5_000_000 // $5 a month unless the file says otherwise
+	}
+	if c.Playground.RateLimitRPM <= 0 {
+		c.Playground.RateLimitRPM = 20
+	}
+	if f.Playground.FaultInjection != nil {
+		c.Playground.FaultInjection = *f.Playground.FaultInjection
 	}
 	if c.Cache.TTL <= 0 {
 		c.Cache.TTL = 24 * time.Hour
@@ -273,4 +300,92 @@ func (c *Catalog) Names() (models, policies []string) {
 	sort.Strings(models)
 	sort.Strings(policies)
 	return
+}
+
+// --- what the dashboard shows about the catalog ---
+
+type ModelInfo struct {
+	ID            string
+	Provider      string
+	Upstream      string
+	Tags          []string
+	ContextWindow int
+	InputPerMtok  money.Micros
+	OutputPerMtok money.Micros
+}
+
+type PolicyInfo struct {
+	Name         string
+	Type         string
+	Models       []ModelInfo // in the order they are tried; for weighted, the arms
+	Weights      []int       // weighted only, parallel to Models
+	Tag          string      // cheapest only
+	HedgeAfterMs int
+	Description  string
+}
+
+// Describe lists the models and policies in a stable order, with a plain sentence for each policy.
+func (c *Catalog) Describe() (models []ModelInfo, policies []PolicyInfo) {
+	ids, names := c.Names()
+	info := func(m Model) ModelInfo {
+		return ModelInfo{ID: m.ID, Provider: m.Provider, Upstream: m.Upstream, Tags: m.Tags, ContextWindow: m.ContextWindow, InputPerMtok: m.InputPerMtok, OutputPerMtok: m.OutputPerMtok}
+	}
+	for _, id := range ids {
+		models = append(models, info(c.Models[id]))
+	}
+	join := func(ms []ModelInfo) string {
+		out := make([]string, len(ms))
+		for i, m := range ms {
+			out[i] = m.ID
+		}
+		return strings.Join(out, ", ")
+	}
+	for _, n := range names {
+		p := c.Policies[n]
+		pi := PolicyInfo{Name: n, Type: p.Type, Tag: p.Tag, HedgeAfterMs: int(p.HedgeAfter.Milliseconds())}
+		switch p.Type {
+		case "fixed", "fallback":
+			for _, id := range p.Models {
+				pi.Models = append(pi.Models, info(c.Models[id]))
+			}
+		case "weighted":
+			for _, a := range p.Arms {
+				pi.Models = append(pi.Models, info(c.Models[a.Model]))
+				pi.Weights = append(pi.Weights, a.Weight)
+			}
+		case "cheapest":
+			tagged := c.modelsWithTag(p.Tag)
+			sort.SliceStable(tagged, func(i, j int) bool {
+				ci, cj := tagged[i].InputPerMtok+tagged[i].OutputPerMtok, tagged[j].InputPerMtok+tagged[j].OutputPerMtok
+				return ci < cj
+			})
+			for _, m := range tagged {
+				pi.Models = append(pi.Models, info(m))
+			}
+		}
+		switch {
+		case p.Type == "fixed" && len(pi.Models) == 1:
+			pi.Description = "Always " + pi.Models[0].ID
+		case p.Type == "fixed":
+			pi.Description = "Starts with " + pi.Models[0].ID + ", then " + join(pi.Models[1:])
+		case p.Type == "fallback" && p.HedgeAfter > 0 && len(pi.Models) > 1:
+			pi.Description = fmt.Sprintf("%s first; %s joins after %s", pi.Models[0].ID, pi.Models[1].ID, p.HedgeAfter.Round(time.Millisecond*100))
+		case p.Type == "fallback":
+			pi.Description = "Fallback order: " + join(pi.Models)
+		case p.Type == "cheapest":
+			pi.Description = "Cheapest model tagged " + p.Tag
+		case p.Type == "weighted":
+			total := 0
+			for _, w := range pi.Weights {
+				total += w
+			}
+			parts := make([]string, len(pi.Models))
+			for i, m := range pi.Models {
+				parts[i] = fmt.Sprintf("%s %d%%", m.ID, pi.Weights[i]*100/total)
+			}
+			pi.Description = "Split: " + strings.Join(parts, ", ")
+		}
+		policies = append(policies, pi)
+	}
+	return models, policies
 }

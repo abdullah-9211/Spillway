@@ -60,3 +60,4 @@ policies:
 gateway: { request_timeout: 60s, first_byte_timeout: 15s, idle_timeout: 30s, max_total_ms: 120000, max_retries: 2 }
 breaker: { consecutive_failures: 5, error_rate: 0.5, window: 20, open_for: 30s }
 cache: { exact_ttl: 24h, scope: key, semantic_threshold: 0.95 }
+playground: { key: playground, monthly_budget_usd: 5, rate_limit_rpm: 20, fault_injection: true }

@@ -144,6 +144,79 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/models": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The model catalog and routing policies (read only) */
+        get: operations["listModels"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/playground": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The playground's policies, its key's budget and whether fault injection is on */
+        get: operations["playgroundState"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/playground/chat": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Send one prompt through the gateway under the playground key, optionally making providers fail on purpose
+         * @description Admin only, because it spends money. A prompt no provider could answer is still a 200, with `outcome` and
+         *     `error` set and the failed route in `attempts`. 402 means the playground key's budget is used up and 429
+         *     that its rate limit was hit.
+         */
+        post: operations["playgroundChat"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/playground/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Past playground requests, newest first */
+        get: operations["playgroundHistory"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -366,6 +439,92 @@ export interface components {
         RequestPage: {
             requests: components["schemas"]["RequestLogRow"][];
             next_cursor: string | null;
+        };
+        Fault: {
+            /** @description A provider name from the catalog */
+            provider: string;
+            /** @enum {string} */
+            kind: "rate_limit" | "server_error" | "slow" | "cut_stream";
+        };
+        CatalogModel: {
+            id: string;
+            provider: string;
+            upstream: string;
+            tags: string[];
+            context_window: number;
+            input_usd_per_mtok: string;
+            output_usd_per_mtok: string;
+        };
+        CatalogPolicy: {
+            name: string;
+            /** @enum {string} */
+            type: "fixed" | "fallback" | "cheapest" | "weighted";
+            description: string;
+            /** @description In the order they are tried (for weighted, the arms) */
+            models: {
+                id: string;
+                provider: string;
+            }[];
+            /** @description Distinct providers in the order they would be tried */
+            providers: string[];
+            weights: number[];
+            tag: string;
+            hedge_after_ms: number;
+        };
+        PlaygroundState: {
+            key: {
+                prefix: string;
+                monthly_budget_usd: string | null;
+                spend_usd: string;
+                rate_limit_rpm: number | null;
+            };
+            fault_injection: boolean;
+            policies: components["schemas"]["CatalogPolicy"][];
+        };
+        PlaygroundChatRequest: {
+            /** @description A policy name or a model id. Default: default */
+            policy?: string;
+            prompt: string;
+            system?: string;
+            temperature?: number | null;
+            max_tokens?: number | null;
+            /** @description Needed for the cut_stream fault */
+            stream?: boolean;
+            faults?: components["schemas"]["Fault"][];
+        };
+        PlaygroundResult: {
+            /** Format: uuid */
+            id: string;
+            /** Format: date-time */
+            created_at: string;
+            policy: string;
+            stream: boolean;
+            answer: string;
+            finish_reason: string;
+            provider: string;
+            model: string;
+            /** @enum {string} */
+            cache: "miss" | "hit_exact" | "hit_semantic" | "bypass";
+            input_tokens: number;
+            output_tokens: number;
+            cost_usd: string;
+            saved_usd: string;
+            latency_ms: number;
+            /** @description Time spent in Spillway rather than at a provider */
+            overhead_ms: number;
+            outcome: string;
+            error: {
+                code: string;
+                message: string;
+            } | null;
+            attempts: components["schemas"]["Attempt"][];
+            faults: components["schemas"]["Fault"][];
+            /** @description Faults that named a provider the policy would not try */
+            unused_faults: components["schemas"]["Fault"][];
+        };
+        PlaygroundHistoryItem: components["schemas"]["PlaygroundResult"] & {
+            prompt: string;
+            system: string;
         };
         Status: {
             /** @enum {string} */
@@ -752,6 +911,125 @@ export interface operations {
                 };
                 content: {
                     "text/csv": string;
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    listModels: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Models and policies */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        models: components["schemas"]["CatalogModel"][];
+                        policies: components["schemas"]["CatalogPolicy"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    playgroundState: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description State */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlaygroundState"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    playgroundChat: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PlaygroundChatRequest"];
+            };
+        };
+        responses: {
+            /** @description The route taken and the answer */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlaygroundResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            /** @description The playground key's monthly budget is used up */
+            402: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description The playground key's rate limit was hit */
+            429: {
+                headers: {
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    playgroundHistory: {
+        parameters: {
+            query?: {
+                limit?: number;
+                cursor?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        requests: components["schemas"]["PlaygroundHistoryItem"][];
+                        next_cursor: string | null;
+                    };
                 };
             };
             400: components["responses"]["BadRequest"];

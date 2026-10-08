@@ -46,6 +46,8 @@ type ProviderError struct {
 	Status     int
 	RetryAfter time.Duration
 	Err        error
+	// Injected marks a failure the playground caused on purpose. It never counts against a provider's health.
+	Injected bool
 }
 
 func (e *ProviderError) Error() string {

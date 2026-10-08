@@ -77,10 +77,11 @@ ORDER BY sum(u.cost_usd) DESC NULLS LAST, count(*) DESC;
 SELECT
   COALESCE(a->>'provider', '')::text                   AS provider,
   count(*) FILTER (WHERE COALESCE(a->>'error_kind', '') <> '' AND a->>'kind' <> 'skipped')::bigint AS failed_attempts,
-  count(*) FILTER (WHERE a->>'kind' = 'fallback')::bigint                                          AS fallbacks_to
+  count(*) FILTER (WHERE a->>'kind' = 'fallback'  )::bigint AS fallbacks_to
 FROM usage u, jsonb_array_elements(u.attempts) a
 WHERE u.created_at >= @from_ts AND u.created_at < @to_ts
   AND (sqlc.narg(key_id)::uuid IS NULL OR u.api_key_id = sqlc.narg(key_id)::uuid)
+  AND NOT (u.attempts @> '[{"injected": true}]')  -- playground requests with faults say nothing about provider health
 GROUP BY 1
 ORDER BY 1;
 

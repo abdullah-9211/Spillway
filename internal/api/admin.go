@@ -46,6 +46,8 @@ type AdminDeps struct {
 	Throttle *auth.Throttle
 	Keys     KeyAdmin   // the key endpoints are registered only when this is set
 	Usage    UsageAdmin // the usage endpoints are registered only when this is set
+	// Playground, when set, serves /admin/models and /admin/playground/*.
+	Playground *PlaygroundDeps
 	// Health and Latency feed the provider-health and added-latency parts of the usage summary.
 	Health  func() []gateway.ProviderHealth
 	Latency LatencySource
@@ -89,6 +91,9 @@ func NewAdmin(d AdminDeps) *Admin {
 	}
 	if d.Usage != nil {
 		a.registerUsage()
+	}
+	if d.Playground != nil {
+		a.registerPlayground()
 	}
 	return a
 }

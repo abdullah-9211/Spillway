@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"time"
@@ -27,6 +28,9 @@ type Stream struct {
 	chars      int // characters of generated text, for estimating output tokens
 	inputChars int
 	finished   bool
+	final      []usage.Attempt // the attempts as recorded, available once Finish has run
+	tin, tout  int             // tokens, from the provider or estimated, once Finish has run
+	cost       money.Micros
 	requestID  string
 
 	// What was generated, kept so a clean finish can fill the cache. A broken stream is never cached.
@@ -36,6 +40,11 @@ type Stream struct {
 
 	hit   usage.CacheStatus // set when the answer came from a cache
 	entry *Entry
+}
+
+// Totals are the tokens and cost of the stream, valid once Finish has been called.
+func (s *Stream) Totals() (in, out int, cost money.Micros, finish string) {
+	return s.tin, s.tout, s.cost, s.finish
 }
 
 // Attempts is the number of provider calls made to get this stream going; 0 for a cache hit.
@@ -159,9 +168,9 @@ func (s *Stream) collect(ch *provider.ChatChunk) {
 
 // Finish closes the upstream stream, which cancels its request, and records usage. err is nil for a clean
 // end. Calling Finish more than once is harmless.
-func (s *Stream) Finish(ctx context.Context, err error) {
+func (s *Stream) Finish(ctx context.Context, err error) []usage.Attempt {
 	if s.finished {
-		return
+		return s.final
 	}
 	s.finished = true
 	_ = s.rd.Close()
@@ -169,7 +178,7 @@ func (s *Stream) Finish(ctx context.Context, err error) {
 	if s.hit != "" { // a cache hit costs nothing and saves what the original call cost
 		zero := money.Micros(0)
 		s.c.record(finished{outcome: outcomeFor(ctx, err), cost: &zero, saved: s.entry.Cost, cache: s.hit, ttfb: s.ttfb})
-		return
+		return nil
 	}
 
 	outcome := outcomeFor(ctx, err)
@@ -184,9 +193,16 @@ func (s *Stream) Finish(ctx context.Context, err error) {
 	}
 	if err != nil {
 		last.Error, last.ErrorKind = err.Error(), provider.KindOf(err).String()
+		var pe *provider.ProviderError
+		if errors.As(err, &pe) && pe.Injected {
+			last.Injected = true
+		}
 	}
+	s.final = attempts
+	s.tin, s.tout = in, out
 	cost := s.c.record(finished{outcome: outcome, in: in, out: out, ttfb: s.ttfb, attempts: attempts, overhead: s.overhead})
 
+	s.cost = cost
 	if outcome == usage.OutcomeOK && s.usage != nil {
 		msg := provider.Message{Role: "assistant", Content: provider.TextContent(s.text.String()), ToolCalls: s.calls}
 		if s.text.Len() == 0 && len(s.calls) > 0 {
@@ -198,6 +214,7 @@ func (s *Stream) Finish(ctx context.Context, err error) {
 			Usage:   s.usage,
 		}, cost)
 	}
+	return attempts
 }
 
 func outcomeFor(ctx context.Context, err error) usage.Outcome {
