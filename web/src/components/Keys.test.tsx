@@ -193,24 +193,62 @@ describe("KeysView as an admin", () => {
     expect(screen.getByLabelText("Name")).toHaveValue("dup");
   });
 
-  it("edits a key with its current values filled in", async () => {
-    const f = mockApi({ "PATCH /api/keys/1": () => Response.json(key({ id: "1" })) });
-    withRole("admin", <KeysView keys={[key({ id: "1", name: "normal-key", rate_limit_rpm: 60, monthly_budget_usd: "30.000000" })]} />);
-    await userEvent.click(screen.getByRole("button", { name: "Edit normal-key" }));
-    const panel = screen.getByRole("complementary", { name: "Key details" });
-    expect(within(panel).getByLabelText("Name")).toHaveValue("normal-key");
-    expect(within(panel).getByLabelText("Requests a minute")).toHaveValue("60");
-    expect(within(panel).getByLabelText("Monthly budget (USD)")).toHaveValue("30");
-    await userEvent.clear(within(panel).getByLabelText("Monthly budget (USD)"));
-    await userEvent.click(within(panel).getByRole("button", { name: "Save changes" }));
+  it("edits in place: the editor opens directly under that key's row, not in a distant panel", async () => {
+    const f = mockApi({ "PATCH /api/keys/2": () => Response.json(key({ id: "2", name: "second" })) });
+    const list = [key({ id: "1", name: "first" }), key({ id: "2", name: "second", rate_limit_rpm: 60, monthly_budget_usd: "30.000000" }), key({ id: "3", name: "third" })];
+    withRole("admin", <KeysView keys={list} />);
+    await userEvent.click(screen.getByRole("button", { name: "Edit second" }));
+
+    expect(screen.queryByRole("complementary")).toBeNull(); // no side panel for edits
+    const rows = screen.getAllByRole("row").map((r) => r.textContent ?? "");
+    const at = rows.findIndex((t) => t.startsWith("second"));
+    expect(rows[at + 1]).toContain("Save changes"); // the editor is the very next row
+    expect(rows[at + 2]).toContain("third");
+
+    const editor = screen.getByRole("heading", { name: "Edit second" }).parentElement as HTMLElement;
+    expect(within(editor).getByLabelText("Name")).toHaveValue("second");
+    expect(within(editor).getByLabelText("Name")).toHaveFocus();
+    expect(within(editor).getByLabelText("Requests a minute")).toHaveValue("60");
+    expect(within(editor).getByLabelText("Monthly budget (USD)")).toHaveValue("30");
+    await userEvent.clear(within(editor).getByLabelText("Monthly budget (USD)"));
+    await userEvent.click(within(editor).getByRole("button", { name: "Save changes" }));
+
     await waitFor(() => expect(refresh).toHaveBeenCalled());
     const [, init] = f.mock.calls[0] as unknown as [string, RequestInit];
     expect(JSON.parse(init.body as string)).toMatchObject({ monthly_budget_usd: null, rate_limit_rpm: 60 });
-    expect(screen.queryByRole("complementary")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Edit second" })).toBeNull();
+    expect(screen.getByText("Saved changes to second.")).toBeInTheDocument();
   });
 
-  it("asks before revoking, and revokes on confirmation", async () => {
-    const f = mockApi({ "DELETE /api/keys/1": () => Response.json(key({ id: "1", revoked_at: "2026-10-08T12:00:00Z" })) });
+  it("scrolls the editor into view without jumping the page to the top", async () => {
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
+    withRole("admin", <KeysView keys={[key({ id: "1", name: "only" })]} />);
+    await userEvent.click(screen.getByRole("button", { name: "Edit only" }));
+    expect(scroll).toHaveBeenCalledWith({ block: "nearest", behavior: "smooth" });
+    Element.prototype.scrollIntoView = () => {};
+  });
+
+  it("only one editor is open at a time", async () => {
+    withRole("admin", <KeysView keys={[key({ id: "1", name: "a" }), key({ id: "2", name: "b" })]} />);
+    await userEvent.click(screen.getByRole("button", { name: "Edit a" }));
+    await userEvent.click(screen.getByRole("button", { name: "Edit b" }));
+    expect(screen.queryByRole("heading", { name: "Edit a" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "Edit b" })).toBeInTheDocument();
+  });
+
+  it("cancelling an edit changes nothing", async () => {
+    const f = mockApi({});
+    withRole("admin", <KeysView keys={[key({ id: "1", name: "a" })]} />);
+    await userEvent.click(screen.getByRole("button", { name: "Edit a" }));
+    await userEvent.type(screen.getByLabelText("Name"), "zzz");
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("heading", { name: "Edit a" })).toBeNull();
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  it("asks before revoking, in place, and revokes on confirmation", async () => {
+    const f = mockApi({ "DELETE /api/keys/1": () => Response.json(key({ id: "1", name: "doomed", revoked_at: "2026-10-08T12:00:00Z" })) });
     withRole("admin", <KeysView keys={[key({ id: "1", name: "doomed" })]} />);
     await userEvent.click(screen.getByRole("button", { name: "Revoke doomed" }));
     expect(screen.getByRole("heading", { name: "Revoke doomed?" })).toBeInTheDocument();
@@ -222,6 +260,16 @@ describe("KeysView as an admin", () => {
     await userEvent.click(screen.getByRole("button", { name: "Revoke key" }));
     await waitFor(() => expect(f).toHaveBeenCalledTimes(1));
     expect(refresh).toHaveBeenCalled();
+    expect(await screen.findByText(/Revoked doomed/)).toBeInTheDocument();
+  });
+
+  it("shows a failed save in the editor and keeps it open", async () => {
+    mockApi({ "PATCH /api/keys/1": () => Response.json({ code: "key_revoked", message: "A revoked key cannot be changed." }, { status: 409 }) });
+    withRole("admin", <KeysView keys={[key({ id: "1", name: "a" })]} />);
+    await userEvent.click(screen.getByRole("button", { name: "Edit a" }));
+    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("A revoked key cannot be changed.");
+    expect(screen.getByRole("heading", { name: "Edit a" })).toBeInTheDocument();
   });
 
   it("explains an empty list", () => {
@@ -229,9 +277,109 @@ describe("KeysView as an admin", () => {
     expect(screen.getByText(/No keys yet/)).toBeInTheDocument();
   });
 
+  it("has no accessibility violations with an inline editor open", async () => {
+    const { container } = withRole("admin", <KeysView keys={states} />);
+    await userEvent.click(screen.getByRole("button", { name: "Edit normal-key" }));
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
   it("has no accessibility violations with the create panel open", async () => {
     const { container } = withRole("admin", <KeysView keys={states} />);
     await userEvent.click(screen.getByRole("button", { name: "Create key" }));
     expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+function many(n: number): ApiKey[] {
+  return Array.from({ length: n }, (_, i) => key({ id: String(i + 1), name: `key-${String(i + 1).padStart(2, "0")}`, prefix: `spw_${String(i + 1).padStart(4, "0")}`, created_at: `2026-10-${String((i % 28) + 1).padStart(2, "0")}T09:00:00Z` }));
+}
+
+describe("finding keys", () => {
+  const names = () =>
+    screen.getAllByRole("row").slice(1).map((r) => r.querySelector(".nm")?.firstChild?.textContent).filter(Boolean);
+
+  it("pages a long list instead of one endless table", async () => {
+    withRole("admin", <KeysView keys={many(23)} />);
+    expect(names()).toHaveLength(10);
+    expect(screen.getByText("Showing 1 to 10 of 23")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Previous" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(screen.getByText("Showing 11 to 20 of 23")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(names()).toHaveLength(3);
+    expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
+  });
+
+  it("shows no pager when everything fits on one page", () => {
+    withRole("admin", <KeysView keys={many(5)} />);
+    expect(screen.queryByRole("navigation", { name: "Pages of keys" })).toBeNull();
+  });
+
+  it("searches by name or key prefix as you type, and goes back to the first page", async () => {
+    withRole("admin", <KeysView keys={many(23)} />);
+    await userEvent.click(screen.getByRole("button", { name: "Next" }));
+    await userEvent.type(screen.getByRole("searchbox", { name: "Search keys" }), "key-07");
+    expect(names()).toEqual(["key-07"]);
+    expect(screen.getByText("1 of 23 keys")).toBeInTheDocument();
+    await userEvent.clear(screen.getByRole("searchbox", { name: "Search keys" }));
+    await userEvent.type(screen.getByRole("searchbox", { name: "Search keys" }), "spw_0012");
+    expect(names()).toEqual(["key-12"]);
+  });
+
+  it("says so when nothing matches, and offers to clear", async () => {
+    withRole("admin", <KeysView keys={many(3)} />);
+    await userEvent.type(screen.getByRole("searchbox", { name: "Search keys" }), "nothing like this");
+    expect(screen.getByText(/No keys match these filters/)).toBeInTheDocument();
+    await userEvent.click(screen.getAllByRole("button", { name: "Clear filters" })[0]);
+    expect(names()).toHaveLength(3);
+  });
+
+  it("filters by status with counts, hiding revoked keys by default", async () => {
+    withRole("admin", <KeysView keys={states} />);
+    expect(names()).not.toContain("old-demo");
+    expect(screen.getByRole("button", { name: /Active/ })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: /Revoked/ })).toHaveTextContent("1");
+    await userEvent.click(screen.getByRole("button", { name: /Revoked/ }));
+    expect(names()).toEqual(["old-demo"]);
+    await userEvent.click(screen.getByRole("button", { name: /All/ }));
+    expect(names()).toHaveLength(6);
+  });
+
+  it("filters by budget: needs attention, over budget, no limit", async () => {
+    withRole("admin", <KeysView keys={states} />);
+    const sel = screen.getByRole("combobox", { name: "Filter by budget" });
+    await userEvent.selectOptions(sel, "Needs attention");
+    expect(names().sort()).toEqual(["close-key", "over-key"]);
+    await userEvent.selectOptions(sel, "Over budget");
+    expect(names()).toEqual(["over-key"]);
+    await userEvent.selectOptions(sel, "No budget limit");
+    expect(names()).toEqual(["unlimited-key"]);
+  });
+
+  it("sorts", async () => {
+    withRole("admin", <KeysView keys={states} />);
+    const sel = screen.getByRole("combobox", { name: "Sort keys" });
+    await userEvent.selectOptions(sel, "Name, A to Z");
+    expect(names()).toEqual(["close-key", "normal-key", "over-key", "playground", "unlimited-key"]);
+    await userEvent.selectOptions(sel, "Highest spend");
+    expect(names()[0]).toBe("over-key");
+  });
+
+  it("closes an open editor when the list changes under it", async () => {
+    withRole("admin", <KeysView keys={states} />);
+    await userEvent.click(screen.getByRole("button", { name: "Edit normal-key" }));
+    await userEvent.type(screen.getByRole("searchbox", { name: "Search keys" }), "over");
+    expect(screen.queryByRole("heading", { name: /Edit/ })).toBeNull();
+  });
+
+  it("has no accessibility violations", async () => {
+    const { container } = withRole("admin", <KeysView keys={many(23)} />);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("offers the same search to a viewer", async () => {
+    withRole("viewer", <KeysView keys={many(23)} />);
+    await userEvent.type(screen.getByRole("searchbox", { name: "Search keys" }), "key-03");
+    expect(names()).toEqual(["key-03"]);
   });
 });

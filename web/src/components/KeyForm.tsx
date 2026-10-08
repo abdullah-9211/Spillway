@@ -20,6 +20,8 @@ export function KeyForm({
   error,
   onSubmit,
   onCancel,
+  layout = "stacked",
+  autoFocus = false,
 }: {
   initial?: KeyFormValues;
   submitLabel: string;
@@ -27,6 +29,9 @@ export function KeyForm({
   error: string | null;
   onSubmit: (v: KeyFormValues) => void;
   onCancel?: () => void;
+  /** inline lays the fields out across the full width of a table row */
+  layout?: "stacked" | "inline";
+  autoFocus?: boolean;
 }) {
   const [v, setV] = useState<KeyFormValues>(initial);
   const [shown, setShown] = useState<ReturnType<typeof validateKeyForm>>({});
@@ -39,10 +44,10 @@ export function KeyForm({
   }
 
   return (
-    <form onSubmit={submit} className="kform" noValidate>
+    <form onSubmit={submit} className={`kform${layout === "inline" ? " kform--inline" : ""}`} noValidate>
       <div>
         <label className="lab" htmlFor="key-name">Name</label>
-        <input id="key-name" className="inp" type="text" placeholder="For example, ci-pipeline" value={v.name}
+        <input id="key-name" autoFocus={autoFocus} className="inp" type="text" placeholder="For example, ci-pipeline" value={v.name}
           onChange={(e) => setV({ ...v, name: e.target.value })} aria-invalid={!!shown.name} aria-describedby={shown.name ? "key-name-err" : undefined} />
         <Err id="key-name-err" text={shown.name} />
       </div>

@@ -105,3 +105,63 @@ export function formFromKey(k: ApiKey): KeyFormValues {
 }
 
 export const emptyForm: KeyFormValues = { name: "", rpm: "", budget: "", semanticCache: false, cacheNonzeroTemp: false };
+
+// --- finding keys in a long list ---
+
+export type StatusFilter = "active" | "revoked" | "all";
+export type BudgetFilter = "any" | "attention" | "over" | "none";
+export type SortKey = "newest" | "name" | "spend" | "recent";
+
+export type KeyFilters = { query: string; status: StatusFilter; budget: BudgetFilter; sort: SortKey };
+
+export const defaultFilters: KeyFilters = { query: "", status: "active", budget: "any", sort: "newest" };
+
+export function isFiltered(f: KeyFilters): boolean {
+  return f.query.trim() !== "" || f.status !== defaultFilters.status || f.budget !== defaultFilters.budget;
+}
+
+export const PAGE_SIZE = 10;
+
+function matchesBudget(k: ApiKey, f: BudgetFilter): boolean {
+  const { state } = budgetState(k.spend_usd, k.monthly_budget_usd);
+  switch (f) {
+    case "any": return true;
+    case "attention": return state === "close" || state === "over";
+    case "over": return state === "over";
+    case "none": return state === "none";
+  }
+}
+
+const time = (iso: string | null) => (iso ? new Date(iso).getTime() : 0);
+
+/** Applies the search, the status and budget filters, then the sort. Every word typed must appear in the name or the key prefix. */
+export function filterKeys(keys: ApiKey[], f: KeyFilters): ApiKey[] {
+  const words = f.query.toLowerCase().split(/\s+/).filter(Boolean);
+  const out = keys.filter((k) => {
+    if (f.status === "active" && k.revoked_at) return false;
+    if (f.status === "revoked" && !k.revoked_at) return false;
+    if (!matchesBudget(k, f.budget)) return false;
+    const hay = `${k.name} ${k.prefix}`.toLowerCase();
+    return words.every((w) => hay.includes(w));
+  });
+  const byName = (a: ApiKey, b: ApiKey) => a.name.localeCompare(b.name, "en", { sensitivity: "base" });
+  const sorters: Record<SortKey, (a: ApiKey, b: ApiKey) => number> = {
+    newest: (a, b) => time(b.created_at) - time(a.created_at),
+    name: byName,
+    spend: (a, b) => Number(b.spend_usd) - Number(a.spend_usd),
+    recent: (a, b) => time(b.last_used_at) - time(a.last_used_at),
+  };
+  return out.sort((a, b) => sorters[f.sort](a, b) || byName(a, b));
+}
+
+export function countByStatus(keys: ApiKey[]): Record<StatusFilter, number> {
+  const revoked = keys.filter((k) => k.revoked_at).length;
+  return { active: keys.length - revoked, revoked, all: keys.length };
+}
+
+export function paginate<T>(items: T[], page: number, size = PAGE_SIZE) {
+  const pages = Math.max(1, Math.ceil(items.length / size));
+  const p = Math.min(Math.max(1, page), pages);
+  const start = (p - 1) * size;
+  return { items: items.slice(start, start + size), page: p, pages, from: items.length ? start + 1 : 0, to: Math.min(start + size, items.length), total: items.length };
+}

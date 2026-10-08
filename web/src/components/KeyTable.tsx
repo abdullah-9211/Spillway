@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { dateLabel, relativeTime, rpmLabel, type ApiKey } from "@/lib/format";
 import { BudgetBar } from "./BudgetBar";
 
@@ -14,12 +15,15 @@ export function KeyTable({
   now,
   onEdit,
   onRevoke,
+  inline,
 }: {
   keys: ApiKey[];
   canEdit: boolean;
   now?: Date;
   onEdit: (k: ApiKey) => void;
   onRevoke: (k: ApiKey) => void;
+  /** An editor shown directly under one key's row, so the key being changed never leaves the screen. */
+  inline?: { id: string; node: ReactNode };
 }) {
   return (
     <div role="table" aria-label="API keys">
@@ -37,8 +41,10 @@ export function KeyTable({
       {keys.map((k) => {
         const revoked = k.revoked_at != null;
         const editable = canEdit && !revoked && !k.builtin;
+        const open = inline?.id === k.id;
         return (
-          <div role="row" key={k.id} className={`kgrid krow${revoked ? " off" : ""}`} data-state={revoked ? "revoked" : "active"}>
+          <div key={k.id} className={open ? "kgroup kgroup--open" : "kgroup"}>
+          <div role="row" className={`kgrid krow${revoked ? " off" : ""}`} data-state={revoked ? "revoked" : "active"}>
             <div role="cell">
               <span className="nm">
                 {k.name}
@@ -73,6 +79,14 @@ export function KeyTable({
                 </>
               )}
             </div>
+          </div>
+          {open && (
+            <div role="row" className="kinline">
+              <div role="cell" className="kinline__cell">
+                {inline.node}
+              </div>
+            </div>
+          )}
           </div>
         );
       })}
