@@ -2,6 +2,10 @@ import { NextResponse } from "next/server";
 import { adminFetch } from "./api";
 import { SESSION_COOKIE } from "./cookies";
 
+export function sessionTokenOf(request: Request): string | null {
+  return cookieValue(request.headers.get("cookie"), SESSION_COOKIE);
+}
+
 function cookieValue(header: string | null, name: string): string | null {
   for (const part of (header ?? "").split(";")) {
     const [k, ...rest] = part.trim().split("=");

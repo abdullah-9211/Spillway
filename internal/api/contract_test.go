@@ -121,6 +121,15 @@ func TestResponsesMatchTheOpenAPISchema(t *testing.T) {
 		{"playground chat", "POST", "/admin/playground/chat", admin, `{"policy":"hedged","prompt":"hi","faults":[{"provider":"anthropic","kind":"rate_limit"}]}`, nil, 200},
 		{"playground chat invalid", "POST", "/admin/playground/chat", admin, `{"prompt":"x","bogus":true}`, nil, 400},
 		{"playground chat as viewer", "POST", "/admin/playground/chat", viewer, `{"prompt":"x"}`, nil, 403},
+		{"runs summary", "GET", "/admin/runs/summary", viewer, "", nil, 200},
+		{"runs summary week", "GET", "/admin/runs/summary?hours=168", viewer, "", nil, 200},
+		{"runs summary bad range", "GET", "/admin/runs/summary?hours=5", viewer, "", nil, 400},
+		{"runs activity", "GET", "/admin/runs/activity?hours=24", viewer, "", nil, 200},
+		{"runs list", "GET", "/admin/runs?state=finished&limit=2", viewer, "", nil, 200},
+		{"runs list bad cursor", "GET", "/admin/runs?cursor=!!", viewer, "", nil, 400},
+		{"runs list without a token", "GET", "/admin/runs", "", "", nil, 401},
+		{"one run", "GET", "/admin/runs/" + sampleRunID, viewer, "", nil, 200},
+		{"a run that does not exist", "GET", "/admin/runs/" + uuid.NewString(), viewer, "", nil, 404},
 		{"playground without a token", "GET", "/admin/playground", "", "", nil, 401},
 	}
 	for _, tc := range cases {

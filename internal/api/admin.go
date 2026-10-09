@@ -48,6 +48,10 @@ type AdminDeps struct {
 	Usage    UsageAdmin // the usage endpoints are registered only when this is set
 	// Playground, when set, serves /admin/models and /admin/playground/*.
 	Playground *PlaygroundDeps
+	// Runs, when set, serves /admin/runs.
+	Runs RunsAdmin
+	// Now is the clock for run reads; tests set it. Zero means time.Now.
+	Now func() time.Time
 	// Health and Latency feed the provider-health and added-latency parts of the usage summary.
 	Health  func() []gateway.ProviderHealth
 	Latency LatencySource
@@ -94,6 +98,9 @@ func NewAdmin(d AdminDeps) *Admin {
 	}
 	if d.Playground != nil {
 		a.registerPlayground()
+	}
+	if d.Runs != nil {
+		a.registerRuns()
 	}
 	return a
 }

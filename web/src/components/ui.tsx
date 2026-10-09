@@ -9,14 +9,15 @@ export function Panel({ children, className = "", ...rest }: { children: ReactNo
 }
 
 /** A big number with a label. Numbers use Inter with tabular figures, never the mono face. */
-export function StatTile({ label, value, tone, icon }: { label: string; value: ReactNode; tone?: "ok" | "run" | "wait" | "fail"; icon?: ReactNode }) {
+export function StatTile({ label, value, tone, icon, hint }: { label: string; value: ReactNode; tone?: "ok" | "run" | "wait" | "fail"; icon?: ReactNode; hint?: string }) {
   return (
-    <div className="stat" style={tone ? { ["--c" as string]: `var(--${tone})` } : undefined}>
+    <div className={`stat ${icon ? "stat--icon" : ""}`.trim()} style={tone ? { ["--c" as string]: `var(--${tone})` } : undefined}>
       <div className="stat__label">
         {icon}
         {label}
       </div>
       <div className="stat__value">{value}</div>
+      {hint && <div className="stat__hint">{hint}</div>}
     </div>
   );
 }

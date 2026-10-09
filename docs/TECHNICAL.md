@@ -746,9 +746,9 @@ Two slices, each backend then frontend.
 - **Gate B.**
 
 ### Phase 10: runs page
-- [ ] **BE** `GET /admin/runs/summary` (counts and runs waiting for a person), `GET /admin/runs/activity`, `GET /admin/runs` with step strips and a keyset cursor (section 6.3).
+- [x] **BE** `GET /admin/runs/summary` (counts and runs waiting for a person), `GET /admin/runs/activity`, `GET /admin/runs` with step strips and a keyset cursor (section 6.3).
 - [ ] **BE tests:** summary, activity and list endpoints against fixture runs in every status; keyset pagination; step strip capping.
-- [ ] **FE** Runs page: counters, activity bars, the Needs you card, Running now cards with step strips, the Earlier list, time-range control, live updates, and the viewer state.
+- [x] **FE** Runs page: counters, activity bars, the Needs you card, Running now cards with step strips, the Earlier list, time-range control, live updates, and the viewer state.
 - [ ] **FE tests:** Vitest for the strip mapping, counters and the live-update reducer; `vitest-axe`; one basic smoke check that the page loads and shows the counters.
 
 **Verify with me**
@@ -820,5 +820,8 @@ These are the places where this document makes a call the spec left open or phra
 19. **Tool signing secrets (Phase 9).** Calls are signed with `SPILLWAY_WEBHOOK_SECRET`; a tool may carry its own secret as an `X-Spillway-Signing-Secret` entry among its stored headers, which signs and is never sent. With no secret at all a call is unsigned. Redirects from a tool are not followed, so a registered endpoint cannot bounce a call to another host.
 20. **The registry has a store but no endpoints until Phase 12**, so Phase 9 tests register tools through `tools.Store`. `POST /v1/runs` accepts `tools` and refuses names that are not registered.
 21. **The chaos test is gated by the environment.** It runs in full when `CI` is set, reduced when `CHAOS_RUNS` is set (60 second cap, skipped and reported if exceeded), and is skipped otherwise. Its runs are nine steps (four tool calls, five model calls), not eight, so that a run ends on a model answer.
+22. **The Runs page polls every 2 seconds instead of streaming (Phase 10).** The per-run event stream is for one run, and a page of many runs would need a stream of all of them. Polling one snapshot is simpler and keeps the page correct after any pause; it stops while the tab is hidden. The run page (Phase 11) uses the SSE stream.
+23. **A strip shows a run's latest 16 steps**, with `+N` for the earlier ones in front, rather than the first 16 with the rest behind. For a long live run the step that matters is the current one.
+24. **The activity chart has a fourth colour for cancelled runs**, so every run started in a slice is drawn.
 13. **The tool registry has no screen** in the final design, so Phase 12 manages tools through the API and CLI. Adding a screen needs a design first.
 8. **MCP idempotency** depends on the server honouring `spillway/idempotencyKey`. Exactly-once for side effects is guaranteed only for receivers that deduplicate by key; the chaos test measures that against a receiver that does.

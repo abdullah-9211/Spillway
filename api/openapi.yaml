@@ -327,6 +327,99 @@ paths:
                   next_cursor: { type: string, nullable: true }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  /admin/runs/summary:
+    get:
+      operationId: runsSummary
+      summary: Counts by status, and the runs waiting for a person
+      description: Running, Sleeping and Needs you are the runs in those states now; Succeeded, Failed and Cancelled are runs that ended inside the range.
+      x-access: viewer
+      security: [{ bearer: [] }]
+      parameters:
+        - { name: hours, in: query, required: false, schema: { type: integer, enum: [1, 24, 168], default: 24 } }
+      responses:
+        "200":
+          description: Counts and the waiting list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [hours, counts, waiting]
+                properties:
+                  hours: { type: integer }
+                  counts: { $ref: "#/components/schemas/RunCounts" }
+                  waiting:
+                    type: array
+                    items: { $ref: "#/components/schemas/WaitingRun" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /admin/runs/activity:
+    get:
+      operationId: runsActivity
+      summary: Runs started per slice of time, by where they stand now
+      description: One slice per 5 minutes for an hour, per hour for a day, per day for a week. Slices with no runs are included.
+      x-access: viewer
+      security: [{ bearer: [] }]
+      parameters:
+        - { name: hours, in: query, required: false, schema: { type: integer, enum: [1, 24, 168], default: 24 } }
+      responses:
+        "200":
+          description: Buckets, oldest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [hours, bucket_seconds, buckets]
+                properties:
+                  hours: { type: integer }
+                  bucket_seconds: { type: integer }
+                  buckets:
+                    type: array
+                    items: { $ref: "#/components/schemas/ActivityBucket" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /admin/runs:
+    get:
+      operationId: runsList
+      summary: Runs, newest first, each with a strip of its latest steps
+      x-access: viewer
+      security: [{ bearer: [] }]
+      parameters:
+        - { name: state, in: query, required: false, description: "active is every run not finished; finished is runs that ended inside `hours`", schema: { type: string, enum: [active, finished] } }
+        - { name: status, in: query, required: false, schema: { type: string, enum: [queued, running, waiting_tool, waiting_human, sleeping, succeeded, failed, cancelled] } }
+        - { name: hours, in: query, required: false, schema: { type: integer, enum: [1, 24, 168], default: 24 } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+        - { name: cursor, in: query, required: false, schema: { type: string } }
+      responses:
+        "200":
+          description: One page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [runs, next_cursor]
+                properties:
+                  runs:
+                    type: array
+                    items: { $ref: "#/components/schemas/RunItem" }
+                  next_cursor: { type: string, nullable: true }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /admin/runs/{id}:
+    get:
+      operationId: runGet
+      summary: One run, in the shape of a list row
+      x-access: viewer
+      security: [{ bearer: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The run
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RunItem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
 components:
   parameters:
     From:
@@ -689,3 +782,60 @@ components:
           properties:
             code: { type: string }
             message: { type: string }
+    RunCounts:
+      type: object
+      required: [running, sleeping, needs_you, succeeded, failed, cancelled]
+      properties:
+        running: { type: integer }
+        sleeping: { type: integer }
+        needs_you: { type: integer }
+        succeeded: { type: integer }
+        failed: { type: integer }
+        cancelled: { type: integer }
+    WaitingRun:
+      type: object
+      required: [id, goal, tool, waiting_since, key]
+      properties:
+        id: { type: string, format: uuid }
+        goal: { type: string }
+        tool: { type: string }
+        waiting_since: { type: string, format: date-time }
+        key: { type: string, description: The name of the API key that started the run }
+    ActivityBucket:
+      type: object
+      required: [start, succeeded, failed, cancelled, in_progress]
+      properties:
+        start: { type: string, format: date-time }
+        succeeded: { type: integer }
+        failed: { type: integer }
+        cancelled: { type: integer }
+        in_progress: { type: integer }
+    StripNode:
+      type: object
+      required: [kind, state]
+      properties:
+        kind: { type: string, enum: [model, tool] }
+        state: { type: string, enum: [done, current, failed, waiting] }
+    Strip:
+      type: object
+      required: [steps, more]
+      properties:
+        steps: { type: array, items: { $ref: "#/components/schemas/StripNode" }, description: "At most 16: the latest ones" }
+        more: { type: integer, description: How many earlier steps are not shown }
+    RunItem:
+      type: object
+      required: [id, status, goal, key, model, step_count, cost_usd, created_at, finished_at, duration_ms, wake_at, failure_reason, strip]
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [queued, running, waiting_tool, waiting_human, sleeping, succeeded, failed, cancelled] }
+        goal: { type: string }
+        key: { type: string }
+        model: { type: string }
+        step_count: { type: integer }
+        cost_usd: { type: string }
+        created_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time, nullable: true }
+        duration_ms: { type: integer, format: int64 }
+        wake_at: { type: string, format: date-time, nullable: true }
+        failure_reason: { type: string, nullable: true }
+        strip: { $ref: "#/components/schemas/Strip" }

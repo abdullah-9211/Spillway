@@ -217,6 +217,80 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/runs/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Counts by status, and the runs waiting for a person
+         * @description Running, Sleeping and Needs you are the runs in those states now; Succeeded, Failed and Cancelled are runs that ended inside the range.
+         */
+        get: operations["runsSummary"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/runs/activity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Runs started per slice of time, by where they stand now
+         * @description One slice per 5 minutes for an hour, per hour for a day, per day for a week. Slices with no runs are included.
+         */
+        get: operations["runsActivity"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Runs, newest first, each with a strip of its latest steps */
+        get: operations["runsList"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/runs/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One run, in the shape of a list row */
+        get: operations["runGet"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -540,6 +614,65 @@ export interface components {
                 code: string;
                 message: string;
             };
+        };
+        RunCounts: {
+            running: number;
+            sleeping: number;
+            needs_you: number;
+            succeeded: number;
+            failed: number;
+            cancelled: number;
+        };
+        WaitingRun: {
+            /** Format: uuid */
+            id: string;
+            goal: string;
+            tool: string;
+            /** Format: date-time */
+            waiting_since: string;
+            /** @description The name of the API key that started the run */
+            key: string;
+        };
+        ActivityBucket: {
+            /** Format: date-time */
+            start: string;
+            succeeded: number;
+            failed: number;
+            cancelled: number;
+            in_progress: number;
+        };
+        StripNode: {
+            /** @enum {string} */
+            kind: "model" | "tool";
+            /** @enum {string} */
+            state: "done" | "current" | "failed" | "waiting";
+        };
+        Strip: {
+            /** @description At most 16: the latest ones */
+            steps: components["schemas"]["StripNode"][];
+            /** @description How many earlier steps are not shown */
+            more: number;
+        };
+        RunItem: {
+            /** Format: uuid */
+            id: string;
+            /** @enum {string} */
+            status: "queued" | "running" | "waiting_tool" | "waiting_human" | "sleeping" | "succeeded" | "failed" | "cancelled";
+            goal: string;
+            key: string;
+            model: string;
+            step_count: number;
+            cost_usd: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            finished_at: string | null;
+            /** Format: int64 */
+            duration_ms: number;
+            /** Format: date-time */
+            wake_at: string | null;
+            failure_reason: string | null;
+            strip: components["schemas"]["Strip"];
         };
     };
     responses: {
@@ -1034,6 +1167,118 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+        };
+    };
+    runsSummary: {
+        parameters: {
+            query?: {
+                hours?: 1 | 24 | 168;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Counts and the waiting list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        hours: number;
+                        counts: components["schemas"]["RunCounts"];
+                        waiting: components["schemas"]["WaitingRun"][];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    runsActivity: {
+        parameters: {
+            query?: {
+                hours?: 1 | 24 | 168;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Buckets, oldest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        hours: number;
+                        bucket_seconds: number;
+                        buckets: components["schemas"]["ActivityBucket"][];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    runsList: {
+        parameters: {
+            query?: {
+                /** @description active is every run not finished; finished is runs that ended inside `hours` */
+                state?: "active" | "finished";
+                status?: "queued" | "running" | "waiting_tool" | "waiting_human" | "sleeping" | "succeeded" | "failed" | "cancelled";
+                hours?: 1 | 24 | 168;
+                limit?: number;
+                cursor?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        runs: components["schemas"]["RunItem"][];
+                        next_cursor: string | null;
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    runGet: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The run */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunItem"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
         };
     };
 }

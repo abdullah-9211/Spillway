@@ -88,6 +88,19 @@ for (const [label, who, role] of [["admin", admin, "admin"], ["viewer", viewer, 
   const csvText = await csv.text();
   check(`${label} can export a CSV`, csv.status === 200 && (csv.headers.get("content-type") ?? "").includes("text/csv") && csvText.startsWith("day,key,model,requests"), `status ${csv.status}: ${csvText.slice(0, 60)}`);
 
+  const runsHome = await fetch(base + "/", { headers: { cookie } });
+  const runsHtml = await runsHome.text();
+  check(`${label} sees the Runs page with its counters`, runsHome.status === 200 && runsHtml.includes("Running now") && runsHtml.includes("Succeeded") && runsHtml.includes("Time range"), `status ${runsHome.status}`);
+  const runsWeek = await fetch(base + "/?hours=168", { headers: { cookie } });
+  check(`${label} can pick the 7 day range`, runsWeek.status === 200 && (await runsWeek.text()).includes("Activity in the last 7 days"));
+  const snapRes = await fetch(base + "/api/runs/snapshot?hours=24", { headers: { cookie } });
+  const snapJson = (await snapRes.json()) as { counts?: { running?: number }; active?: unknown[]; finished?: unknown[] };
+  check(`${label} gets the live snapshot`, snapRes.status === 200 && typeof snapJson.counts?.running === "number" && Array.isArray(snapJson.active) && Array.isArray(snapJson.finished), `status ${snapRes.status}`);
+  const noSnap = await fetch(base + "/api/runs/snapshot", { redirect: "manual" });
+  check("the live snapshot needs a session", noSnap.status === 401 || (noSnap.status >= 300 && noSnap.status < 400), `status ${noSnap.status}`);
+  const bad = await fetch(base + "/runs/not-a-run-id", { headers: { cookie } });
+  check(`${label} gets a 404 for a run that does not exist`, bad.status === 404, `status ${bad.status}`);
+
   const pg = await fetch(base + "/playground", { headers: { cookie } });
   const pgHtml = await pg.text();
   const sendDisabled = /<button[^>]*disabled[^>]*>Send</.test(pgHtml);

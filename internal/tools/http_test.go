@@ -150,7 +150,9 @@ func TestFailuresAreErrorsTheModelCanRead(t *testing.T) {
 		}
 	})
 	t.Run("a redirect is not followed", func(t *testing.T) {
-		_, mk := serve(t, func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "http://169.254.169.254/", http.StatusFound) })
+		_, mk := serve(t, func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "http://169.254.169.254/", http.StatusFound)
+		})
 		if _, err := mk(Tool{}).Call(context.Background(), inv("send_email")); err == nil || !strings.Contains(err.Error(), "302") {
 			t.Errorf("err = %v", err)
 		}

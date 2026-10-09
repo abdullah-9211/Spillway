@@ -77,6 +77,9 @@ func newPlaygroundRig(t *testing.T) (*adminRig, *fakePlayground) {
 			return keys.Stats{Key: keys.Key{Prefix: "spw_play", MonthlyBudget: &budget, RateLimitRPM: &rpm}, Spend: 840_000}, nil
 		}}
 	r.admin.registerPlayground()
+	r.admin.d.Runs = sampleRuns()
+	r.admin.d.Now = func() time.Time { return runsNow }
+	r.admin.registerRuns()
 	return r, fp
 }
 
