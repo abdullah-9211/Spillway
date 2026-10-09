@@ -534,3 +534,27 @@ button.lg:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; 
 .ai { animation: rise 0.35s ease-out; }
 @keyframes rise { from { opacity: 0; transform: translateY(8px); } }
 @media (prefers-reduced-motion: reduce) { .ai { animation: none; } .caret { animation: none; } }
+
+/* --- playground polish: small motions that make it feel alive --- */
+.pol { transition: transform 0.18s ease, background 0.18s ease, border-color 0.18s ease, box-shadow 0.25s ease; }
+.pol:hover { transform: translateY(-3px); }
+.pol.on { box-shadow: 0 0 0 1px var(--text), 0 8px 30px -12px var(--accent); }
+.cz { transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease; }
+.cz:hover:not(:disabled) { transform: translateY(-1px); }
+.cz.on { animation: zap 0.35s ease-out; }
+.cz.on svg { animation: zapicon 0.5s ease-out; }
+@keyframes zap { 0% { transform: scale(0.92); } 55% { transform: scale(1.07); } 100% { transform: scale(1); } }
+@keyframes zapicon { 0% { transform: rotate(-30deg) scale(0.6); } 60% { transform: rotate(8deg) scale(1.35); } 100% { transform: none; } }
+.me { animation: slidein 0.3s ease-out; }
+@keyframes slidein { from { opacity: 0; transform: translateX(24px); } }
+.ai { animation: rise 0.35s ease-out, glowpulse 1.4s ease-out; }
+@keyframes glowpulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 55%, transparent); } 100% { box-shadow: 0 0 0 18px transparent; } }
+.btn.pri:not(:disabled) { transition: transform 0.12s ease, background 0.15s ease; }
+.btn.pri:not(:disabled):active { transform: scale(0.96); }
+.scene-panel { transition: box-shadow 0.4s ease; }
+.scene-panel:has(.scene[data-phase="waiting"]) { box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 60%, transparent), 0 0 40px -10px var(--accent); }
+.scene-panel:has(.scene[data-phase="playing"]) { box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent); }
+@media (prefers-reduced-motion: reduce) {
+  .pol, .cz, .me, .scene-panel { transition: none; animation: none; }
+  .cz.on, .cz.on svg, .ai { animation: none; }
+}

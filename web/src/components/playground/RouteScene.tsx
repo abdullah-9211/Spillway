@@ -17,7 +17,7 @@ type Props = {
 
 const HEIGHT = 210;
 const R = 20;
-const POOL = 420;
+const POOL = 900;
 
 /**
  * The playground's stage, drawn with three.js: the request is a packet of light that travels from stop to stop.
@@ -42,10 +42,16 @@ export function RouteScene({ nodes, phase, playKey, onDone, onNode }: Props) {
     if (!el) return;
     let stop = () => {};
     let dead = false;
-    import("three")
-      .then((THREE) => {
+    Promise.all([
+      import("three"),
+      import("three/examples/jsm/postprocessing/EffectComposer.js"),
+      import("three/examples/jsm/postprocessing/RenderPass.js"),
+      import("three/examples/jsm/postprocessing/UnrealBloomPass.js"),
+      import("three/examples/jsm/postprocessing/OutputPass.js"),
+    ])
+      .then(([THREE, ec, rp, ub, op]) => {
         if (dead) return;
-        const off = build(THREE, el, live);
+        const off = build(THREE, { EffectComposer: ec.EffectComposer, RenderPass: rp.RenderPass, UnrealBloomPass: ub.UnrealBloomPass, OutputPass: op.OutputPass }, el, live);
         if (off) stop = off;
         else setOk(false);
       })
@@ -77,10 +83,12 @@ type Three = typeof import("three");
 
 const cssColor = (el: HTMLElement, name: string, fallback: string) => getComputedStyle(el).getPropertyValue(name).trim() || fallback;
 
-function build(THREE: Three, el: HTMLElement, live: Live): (() => void) | null {
+type Post = { EffectComposer: typeof import("three/examples/jsm/postprocessing/EffectComposer.js").EffectComposer; RenderPass: typeof import("three/examples/jsm/postprocessing/RenderPass.js").RenderPass; UnrealBloomPass: typeof import("three/examples/jsm/postprocessing/UnrealBloomPass.js").UnrealBloomPass; OutputPass: typeof import("three/examples/jsm/postprocessing/OutputPass.js").OutputPass };
+
+function build(THREE: Three, post: Post, el: HTMLElement, live: Live): (() => void) | null {
   let renderer: InstanceType<Three["WebGLRenderer"]>;
   try {
-    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer = new THREE.WebGLRenderer({ antialias: true });
   } catch {
     return null;
   }
@@ -92,9 +100,17 @@ function build(THREE: Three, el: HTMLElement, live: Live): (() => void) | null {
   const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
   const scene = new THREE.Scene();
   const camera = new THREE.OrthographicCamera(0, 1, HEIGHT, 0, -10, 10);
+  const composer = new post.EffectComposer(renderer);
+  composer.addPass(new post.RenderPass(scene, camera));
+  const bloom = new post.UnrealBloomPass(new THREE.Vector2(1, 1), 0.7, 0.55, 0.12);
+  composer.addPass(bloom);
+  composer.addPass(new post.OutputPass());
+  let flash = 0; // 0..1, decays: a bright pulse on a result
+  let shakeCam = 0;
+  const mouse = { x: 0.5, y: 0.5, sx: 0.5, sy: 0.5 };
 
   // --- colours from the theme tokens ---
-  const col = { ok: new THREE.Color(), fail: new THREE.Color(), mute: new THREE.Color(), line: new THREE.Color(), text: new THREE.Color(), bg: new THREE.Color(), accent: new THREE.Color() };
+  const col = { ok: new THREE.Color(), fail: new THREE.Color(), mute: new THREE.Color(), line: new THREE.Color(), text: new THREE.Color(), bg: new THREE.Color(), accent: new THREE.Color(), wait: new THREE.Color() };
   let light = false;
   const readColors = () => {
     const set = (c: InstanceType<Three["Color"]>, v: string, fb: string) => c.set(v || fb);
@@ -105,11 +121,14 @@ function build(THREE: Three, el: HTMLElement, live: Live): (() => void) | null {
     set(col.text, cssColor(el, "--text", "#f7f8f8"), "#f7f8f8");
     set(col.bg, cssColor(el, "--bg", "#010102"), "#010102");
     set(col.accent, cssColor(el, "--accent", "#5e6ad2"), "#5e6ad2");
+    set(col.wait, cssColor(el, "--wait", "#e8a55a"), "#e8a55a");
     light = col.bg.r + col.bg.g + col.bg.b > 1.5;
   };
   readColors();
+  renderer.setClearColor(col.bg, 1);
   const themeWatch = new MutationObserver(() => {
     readColors();
+    renderer.setClearColor(col.bg, 1);
     restyle();
   });
   themeWatch.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
@@ -134,11 +153,12 @@ function build(THREE: Three, el: HTMLElement, live: Live): (() => void) | null {
   const wave = new THREE.RingGeometry(0.92, 1, 64);
   const bar = new THREE.PlaneGeometry(1, 2);
   const barL = new THREE.PlaneGeometry(1, 2).translate(0.5, 0, 0); // anchored at its left end, so scaling grows it rightwards
-  const owned: { dispose(): void }[] = [glowTex, disc, ring, wave, bar, barL];
+  const cageG = new THREE.EdgesGeometry(new THREE.IcosahedronGeometry(R * 0.55, 0));
+  const owned: { dispose(): void }[] = [glowTex, disc, ring, wave, bar, barL, cageG];
   const mat = <T extends InstanceType<Three["Material"]>>(m: T) => (owned.push(m), m);
 
   // --- nodes ---
-  type N = { data: SceneNode; x: number; y: number; ringM: InstanceType<Three["MeshBasicMaterial"]>; fillM: InstanceType<Three["MeshBasicMaterial"]>; glow: InstanceType<Three["Sprite"]>; group: InstanceType<Three["Group"]>; shown: SceneNode["state"]; born: number; shake: number; hover: number };
+  type N = { data: SceneNode; x: number; y: number; ringM: InstanceType<Three["MeshBasicMaterial"]>; fillM: InstanceType<Three["MeshBasicMaterial"]>; glow: InstanceType<Three["Sprite"]>; group: InstanceType<Three["Group"]>; shown: SceneNode["state"]; born: number; shake: number; hover: number; cage: InstanceType<Three["LineSegments"]>; cageM: InstanceType<Three["LineBasicMaterial"]>; spin: number };
   const nodes: N[] = [];
   const links: { m: InstanceType<Three["MeshBasicMaterial"]>; fill: InstanceType<Three["Mesh"]>; fillM: InstanceType<Three["MeshBasicMaterial"]> }[] = [];
   const Y = HEIGHT * 0.62;
@@ -152,9 +172,12 @@ function build(THREE: Three, el: HTMLElement, live: Live): (() => void) | null {
       const gm = mat(new THREE.SpriteMaterial({ map: glowTex, transparent: true, depthWrite: false, opacity: 0 }));
       const glow = new THREE.Sprite(gm);
       glow.scale.set(R * 4.4, R * 4.4, 1);
-      group.add(glow, new THREE.Mesh(disc, mat(new THREE.MeshBasicMaterial({ color: col.bg }))), new THREE.Mesh(disc, fillM), new THREE.Mesh(ring, ringM));
+      const cageM = mat(new THREE.LineBasicMaterial({ transparent: true, opacity: 0.9 }));
+      const cage = new THREE.LineSegments(cageG, cageM);
+      cage.position.z = 0.5;
+      group.add(glow, new THREE.Mesh(disc, mat(new THREE.MeshBasicMaterial({ color: col.bg }))), new THREE.Mesh(disc, fillM), cage, new THREE.Mesh(ring, ringM));
       scene.add(group);
-      nodes.push({ data: d, x: 0, y: Y, ringM, fillM, glow, group, shown: d.state === "start" ? "start" : "plan", born: 120 + i * 90, shake: 0, hover: 0 });
+      nodes.push({ data: d, x: 0, y: Y, ringM, fillM, glow, group, shown: d.state === "start" ? "start" : "plan", born: 120 + i * 90, shake: 0, hover: 0, cage, cageM, spin: 0.5 });
       if (i > 0) {
         const m = mat(new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.9 }));
         const fm = mat(new THREE.MeshBasicMaterial({ transparent: true }));
@@ -194,6 +217,80 @@ function build(THREE: Three, el: HTMLElement, live: Live): (() => void) | null {
     w.mesh.visible = true;
   };
 
+  // drifting dust in the background, shifted a little by the pointer for depth
+  const DUST = 120;
+  const dustPos = new Float32Array(DUST * 3);
+  const dustSpd = new Float32Array(DUST);
+  for (let i = 0; i < DUST; i++) {
+    dustPos[i * 3] = Math.random() * 1200;
+    dustPos[i * 3 + 1] = Math.random() * HEIGHT;
+    dustPos[i * 3 + 2] = -5;
+    dustSpd[i] = 4 + Math.random() * 14;
+  }
+  const dustGeo = new THREE.BufferGeometry();
+  dustGeo.setAttribute("position", new THREE.BufferAttribute(dustPos, 3));
+  const dustM = mat(new THREE.PointsMaterial({ size: 2, transparent: true, opacity: 0.5, depthWrite: false, sizeAttenuation: false }));
+  const dust = new THREE.Points(dustGeo, dustM);
+  dust.frustumCulled = false;
+  scene.add(dust);
+  owned.push(dustGeo);
+
+  // a comet tail behind the packet
+  const TAIL = 28;
+  const tailPos = new Float32Array(TAIL * 3);
+  const tailCol = new Float32Array(TAIL * 3);
+  const tailGeo = new THREE.BufferGeometry();
+  tailGeo.setAttribute("position", new THREE.BufferAttribute(tailPos, 3));
+  tailGeo.setAttribute("color", new THREE.BufferAttribute(tailCol, 3));
+  const tailM = mat(new THREE.LineBasicMaterial({ vertexColors: true, transparent: true }));
+  const tail = new THREE.Line(tailGeo, tailM);
+  tail.frustumCulled = false;
+  scene.add(tail);
+  owned.push(tailGeo);
+  const trail: [number, number][] = [];
+
+  // lightning: a few jagged lines that are redrawn while they live
+  const BOLT_PTS = 14;
+  const bolts = Array.from({ length: 6 }, () => {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(BOLT_PTS * 3), 3));
+    const m = mat(new THREE.LineBasicMaterial({ transparent: true }));
+    const line = new THREE.Line(g, m);
+    line.frustumCulled = false;
+    line.visible = false;
+    scene.add(line);
+    owned.push(g);
+    return { line, m, g, life: 0, x1: 0, y1: 0, x2: 0, y2: 0, redraw: 0 };
+  });
+  let boltI = 0;
+  const drawBolt = (b: (typeof bolts)[number]) => {
+    const a = b.g.attributes.position.array as Float32Array;
+    const dx = b.x2 - b.x1, dy = b.y2 - b.y1;
+    const len = Math.hypot(dx, dy) || 1;
+    const nx = -dy / len, ny = dx / len;
+    for (let i = 0; i < BOLT_PTS; i++) {
+      const t = i / (BOLT_PTS - 1);
+      const j = i === 0 || i === BOLT_PTS - 1 ? 0 : (Math.random() - 0.5) * Math.min(26, len * 0.35);
+      a[i * 3] = b.x1 + dx * t + nx * j;
+      a[i * 3 + 1] = b.y1 + dy * t + ny * j;
+      a[i * 3 + 2] = 2.5;
+    }
+    b.g.attributes.position.needsUpdate = true;
+  };
+  const bolt = (x1: number, y1: number, x2: number, y2: number, color: InstanceType<Three["Color"]>, life = 220) => {
+    const b = bolts[boltI++ % bolts.length];
+    Object.assign(b, { x1, y1, x2, y2, life, redraw: 0 });
+    b.m.color.copy(color);
+    b.line.visible = true;
+    drawBolt(b);
+  };
+
+  // a full-width wash of colour for a moment when a result lands
+  const wash = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), mat(new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false })));
+  wash.position.z = 4;
+  scene.add(wash);
+  owned.push(wash.geometry);
+
   const pos = new Float32Array(POOL * 3);
   const colr = new Float32Array(POOL * 3);
   const vel = new Float32Array(POOL * 2);
@@ -208,7 +305,7 @@ function build(THREE: Three, el: HTMLElement, live: Live): (() => void) | null {
   scene.add(points);
   owned.push(geo);
   let pi = 0;
-  const spark = (x: number, y: number, color: InstanceType<Three["Color"]>, n: number, speed: number, gravity = 0) => {
+  const spark = (x: number, y: number, color: InstanceType<Three["Color"]> | InstanceType<Three["Color"]>[], n: number, speed: number, gravity = 0) => {
     for (let k = 0; k < n; k++) {
       const i = pi++ % POOL;
       const a = Math.random() * Math.PI * 2;
@@ -217,15 +314,19 @@ function build(THREE: Three, el: HTMLElement, live: Live): (() => void) | null {
       pos[i * 3 + 1] = y;
       vel[i * 2] = Math.cos(a) * s;
       vel[i * 2 + 1] = Math.sin(a) * s + gravity;
-      colr[i * 3] = color.r;
-      colr[i * 3 + 1] = color.g;
-      colr[i * 3 + 2] = color.b;
+      const c = Array.isArray(color) ? color[Math.floor(Math.random() * color.length)] : color;
+      colr[i * 3] = c.r;
+      colr[i * 3 + 1] = c.g;
+      colr[i * 3 + 2] = c.b;
       maxLife[i] = life[i] = 450 + Math.random() * 600;
     }
   };
 
   const stateColor = (s: SceneNode["state"]) => (s === "ok" ? col.ok : s === "fail" ? col.fail : s === "start" ? col.text : col.mute);
   function restyle() {
+    bloom.enabled = !light;
+    bloom.strength = 0.75;
+    dustM.color.copy(col.mute);
     pointsM.blending = light ? THREE.NormalBlending : THREE.AdditiveBlending;
     for (const l of links) l.m.color.copy(col.line);
     packetCore.material.color.copy(light ? col.accent : col.text);
@@ -242,9 +343,14 @@ function build(THREE: Three, el: HTMLElement, live: Live): (() => void) | null {
   function layout() {
     const w = el.clientWidth || 600;
     renderer.setSize(w, HEIGHT, false);
+    composer.setSize(w, HEIGHT);
+    bloom.resolution.set(w, HEIGHT);
     renderer.domElement.style.width = `${w}px`;
     renderer.domElement.style.height = `${HEIGHT}px`;
     camera.right = w;
+    wash.scale.set(w, HEIGHT, 1);
+    wash.position.set(w / 2, HEIGHT / 2, 4);
+    for (let i = 0; i < DUST; i++) if (dustPos[i * 3] > w) dustPos[i * 3] = Math.random() * w;
     camera.updateProjectionMatrix();
     nodes.forEach((n, i) => {
       n.x = ((i + 0.5) / nodes.length) * w;
@@ -261,6 +367,7 @@ function build(THREE: Three, el: HTMLElement, live: Live): (() => void) | null {
       l.fill.userData.x0 = a.x + R;
     });
   }
+  const W_ = () => el.clientWidth || 600;
   const resize = new ResizeObserver(layout);
   resize.observe(el);
   layout();
@@ -284,12 +391,23 @@ function build(THREE: Three, el: HTMLElement, live: Live): (() => void) | null {
     if (!withFx) return;
     if (s === "fail") {
       n.shake = 1;
+      n.spin = 9;
       pulse(n.x, n.y, col.fail, 66, 600);
-      spark(n.x, n.y, col.fail, 46, 190);
+      spark(n.x, n.y, col.fail, 70, 220);
+      const idx = nodes.indexOf(n);
+      const prev = nodes[Math.max(idx - 1, 0)];
+      bolt(prev.x + R, prev.y, n.x - R, n.y, col.fail, 360);
+      for (let k = 0; k < 3; k++) bolt(n.x, n.y, n.x + Math.cos(k * 2.1 + 1) * 62, n.y + Math.sin(k * 2.1 + 1) * 62, col.fail, 240);
+      flash = 0.8;
+      shakeCam = 1;
+      wash.material.color.copy(col.fail);
     } else if (s === "ok") {
+      n.spin = 7;
       pulse(n.x, n.y, col.ok, 84, 900);
       pulse(n.x, n.y, col.ok, 56, 600);
-      spark(n.x, n.y, col.ok, 80, 230, 40);
+      spark(n.x, n.y, [col.ok, col.accent, col.wait, col.text], 190, 300, 60);
+      flash = 1;
+      wash.material.color.copy(col.ok);
     }
   };
 
@@ -307,7 +425,7 @@ function build(THREE: Three, el: HTMLElement, live: Live): (() => void) | null {
     step(now);
   };
   const step = (now: number) => {
-    const dt = Math.min(now - last, 50);
+    const dt = Math.max(0, Math.min(now - last, 50));
     last = now;
     const { phase, playKey, nodes: data } = live.current;
     if (phase !== lastPhase || playKey !== lastKey) {
@@ -320,8 +438,8 @@ function build(THREE: Three, el: HTMLElement, live: Live): (() => void) | null {
         links.forEach((l) => l.fill.scale.set(0, 1.5, 1));
       }
     }
-    const el_ = now - phaseT;
-    const clock = now - t0;
+    const el_ = Math.max(0, now - phaseT); // rAF timestamps can precede performance.now() by a hair
+    const clock = Math.max(0, now - t0);
 
     // nodes: pop in, shake, hover, flicker when a fault is set
     nodes.forEach((n, i) => {
@@ -337,6 +455,12 @@ function build(THREE: Three, el: HTMLElement, live: Live): (() => void) | null {
       const flick = faulted ? (Math.sin(clock * 0.03 + i * 3) > 0.15 ? 1 : 0.35) : 1;
       n.ringM.color.copy(faulted ? col.fail : stateColor(n.shown)).multiplyScalar(1);
       n.ringM.opacity = (n.shown === "plan" ? 0.8 : 1) * flick;
+      n.spin += ((n.shown === "plan" ? 0.5 : 1.1) - n.spin) * Math.min(1, dt / 500);
+      n.cage.rotation.x += (n.spin * dt) / 1000;
+      n.cage.rotation.y += (n.spin * 1.3 * dt) / 1000;
+      n.cageM.color.copy(faulted ? col.fail : stateColor(n.shown));
+      n.cageM.opacity = (n.shown === "plan" ? 0.55 : 0.95) * flick;
+      if (faulted && Math.random() < dt / 380) bolt(n.x, n.y, n.x + (Math.random() - 0.5) * 120, n.y + (Math.random() - 0.5) * 90, col.fail, 160);
       n.fillM.opacity = n.shown === "ok" || n.shown === "fail" ? 0.22 : n.shown === "start" ? 0.08 : 0;
       const gm = n.glow.material as InstanceType<Three["SpriteMaterial"]>;
       const glowTarget = n.shown === "ok" ? 0.5 : n.shown === "fail" ? 0.45 : faulted ? 0.3 * flick : n.shown === "start" ? 0.18 : 0;
@@ -408,6 +532,59 @@ function build(THREE: Three, el: HTMLElement, live: Live): (() => void) | null {
       w.m.opacity = 0.8 * (1 - k);
     }
 
+    // comet tail
+    if (packetOn) trail.unshift([px, py]);
+    else if (trail.length) trail.pop();
+    while (trail.length > TAIL) trail.pop();
+    const tc = light ? col.accent : col.text;
+    for (let i = 0; i < TAIL; i++) {
+      const p = trail[Math.min(i, Math.max(trail.length - 1, 0))] ?? [px, py];
+      tailPos[i * 3] = p[0];
+      tailPos[i * 3 + 1] = p[1];
+      tailPos[i * 3 + 2] = 1;
+      const f = trail.length ? Math.pow(1 - i / TAIL, 2) * (i < trail.length ? 1 : 0) : 0;
+      tailCol[i * 3] = col.accent.r * f + tc.r * f * 0.2;
+      tailCol[i * 3 + 1] = col.accent.g * f + tc.g * f * 0.2;
+      tailCol[i * 3 + 2] = col.accent.b * f + tc.b * f * 0.2;
+    }
+    tailGeo.attributes.position.needsUpdate = true;
+    tailGeo.attributes.color.needsUpdate = true;
+    tailM.blending = light ? THREE.NormalBlending : THREE.AdditiveBlending;
+
+    // dust drifts, and shifts a little with the pointer
+    mouse.sx += (mouse.x - mouse.sx) * 0.06;
+    mouse.sy += (mouse.y - mouse.sy) * 0.06;
+    for (let i = 0; i < DUST; i++) {
+      dustPos[i * 3] -= (dustSpd[i] * dt) / 1000;
+      if (dustPos[i * 3] < -10) dustPos[i * 3] = W_() + 10;
+    }
+    dust.position.set((0.5 - mouse.sx) * 18, (0.5 - mouse.sy) * 10, 0);
+    dustGeo.attributes.position.needsUpdate = true;
+
+    // lightning
+    for (const b of bolts) {
+      if (!b.line.visible) continue;
+      b.life -= dt;
+      if (b.life <= 0) {
+        b.line.visible = false;
+        continue;
+      }
+      b.redraw -= dt;
+      if (b.redraw <= 0) {
+        drawBolt(b);
+        b.redraw = 45;
+      }
+      b.m.opacity = Math.min(1, b.life / 140);
+    }
+
+    // flash and shake
+    flash = Math.max(0, flash - dt / 520);
+    shakeCam = Math.max(0, shakeCam - dt / 380);
+    wash.material.opacity = flash * (light ? 0.1 : 0.16);
+    bloom.strength = 0.75 + flash * 1.1;
+    camera.position.x = (Math.random() - 0.5) * shakeCam * 7;
+    camera.position.y = (Math.random() - 0.5) * shakeCam * 5;
+
     // particles
     for (let i = 0; i < POOL; i++) {
       if (life[i] <= 0) {
@@ -429,7 +606,7 @@ function build(THREE: Three, el: HTMLElement, live: Live): (() => void) | null {
     }
     geo.attributes.position.needsUpdate = true;
     geo.attributes.color.needsUpdate = true;
-    renderer.render(scene, camera);
+    composer.render();
   };
 
   // pointer: hover and click on provider nodes
@@ -439,6 +616,9 @@ function build(THREE: Three, el: HTMLElement, live: Live): (() => void) | null {
     return nodes.findIndex((n, i) => i > 0 && n.data.provider && Math.hypot(n.x - x, n.y - y) < R + 10);
   };
   const onMove = (e: PointerEvent) => {
+    const r0 = renderer.domElement.getBoundingClientRect();
+    mouse.x = (e.clientX - r0.left) / Math.max(r0.width, 1);
+    mouse.y = (e.clientY - r0.top) / Math.max(r0.height, 1);
     const i = live.current.onNode ? nodeAt(e) : -1;
     nodes.forEach((n, k) => (n.hover = k === i ? 1 : 0));
     renderer.domElement.style.cursor = i >= 0 ? "pointer" : "";
@@ -474,6 +654,7 @@ function build(THREE: Three, el: HTMLElement, live: Live): (() => void) | null {
     renderer.domElement.removeEventListener("pointerleave", onLeave);
     renderer.domElement.removeEventListener("pointerdown", onClick);
     owned.forEach((o) => o.dispose());
+    composer.dispose();
     renderer.dispose();
     renderer.domElement.remove();
     void packetX;
