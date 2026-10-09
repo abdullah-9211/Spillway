@@ -83,3 +83,27 @@ func TestShippedCatalogParses(t *testing.T) {
 		t.Fatalf("config/models.yaml must always be valid: %v", err)
 	}
 }
+
+func TestRunSettingsDefaultsAndChecks(t *testing.T) {
+	c, err := ParseCatalog([]byte(goodCatalog))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := c.Runs
+	if r.LeaseTTL != 30*time.Second || r.Heartbeat != 10*time.Second || r.Workers != 8 || r.MaxSteps != 50 || r.MaxCost != 1_000_000 || r.Deadline != 15*time.Minute || r.ToolErrorBudget != 3 {
+		t.Errorf("defaults = %+v", r)
+	}
+	c, err = ParseCatalog([]byte(goodCatalog + "runs: { lease_ttl: 3s, heartbeat: 1s, workers: 2, max_steps: 5, max_cost_usd: 0.25, deadline: 90s, tool_error_budget: 2 }\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := c.Runs; r.LeaseTTL != 3*time.Second || r.Heartbeat != time.Second || r.Workers != 2 || r.MaxSteps != 5 || r.MaxCost != 250_000 || r.Deadline != 90*time.Second || r.ToolErrorBudget != 2 {
+		t.Errorf("configured = %+v", r)
+	}
+	if _, err := ParseCatalog([]byte(goodCatalog + "runs: { lease_ttl: 4s, heartbeat: 3s }\n")); err == nil {
+		t.Error("a heartbeat longer than half the lease must be refused")
+	}
+	if !c.Has("sonnet") || !c.Has("default") || c.Has("nope") {
+		t.Error("Has should know models and policies")
+	}
+}

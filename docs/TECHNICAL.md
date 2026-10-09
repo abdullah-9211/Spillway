@@ -723,10 +723,10 @@ Two slices, each backend then frontend.
 
 ### Phase 8: run engine
 *Backend only. First screen: Runs, Phase 10. Verified through the CLI and the API.*
-- [ ] **BE** Migrations: `runs`, `run_steps` (with `worker_id` and the `reissued` phase), `tools`; encryption helper for `headers_enc`.
-- [ ] **BE** Run store: append with fencing, projection update, idempotent create. `POST /v1/runs`, `GET /v1/runs/{id}`, `GET /v1/runs/{id}/steps`.
-- [ ] **BE** Worker pool: claim, heartbeat, release on shutdown, limits check, replay and frontier logic, `reissued` rows, and the model-call step through the in-process gateway path.
-- [ ] **BE** CLI for checking by hand: `spillway runs create|get|steps|cancel`.
+- [x] **BE** Migrations: `runs`, `run_steps` (with `worker_id` and the `reissued` phase), `tools`; encryption helper for `headers_enc`.
+- [x] **BE** Run store: append with fencing, projection update, idempotent create. `POST /v1/runs`, `GET /v1/runs/{id}`, `GET /v1/runs/{id}/steps`.
+- [x] **BE** Worker pool: claim, heartbeat, release on shutdown, limits check, replay and frontier logic, `reissued` rows, and the model-call step through the in-process gateway path.
+- [x] **BE** CLI for checking by hand: `spillway runs create|get|steps|cancel`.
 - [ ] **BE tests:** replay on synthetic step lists as property tests (any prefix of a valid run resumes to the same result); every state transition; fencing (a zombie worker's write is rejected); lease expiry with a fake clock; a step reissued twice; every limit trip; the CLI commands.
 
 **Verify with me**
@@ -812,5 +812,10 @@ These are the places where this document makes a call the spec left open or phra
 10. **The dashboard has two token sets, not one themed palette.** The dark theme follows the Linear design file and the light theme follows the Claude design file, as decided with the design. Title typeface, accent and button size therefore change with the theme.
 11. **The Runs page and run view are bigger than the spec's "list and timeline".** They add a needs-approval card, an activity chart, per-run step strips and a graph view, which require the read endpoints in section 6.3.
 12. **The plan is phased, not dated, and organised by feature.** Each phase builds the backend first, then the frontend, then stops for you to verify both (section 10). The dashboard shell and login come at Phase 4 so you see a frontend early, instead of building all the backend first.
+14. **Runs gain a `cancel_requested_at` column and a `limits` column (Phase 8).** A cancel for a run a live worker holds cannot be written by the API (the fence would refuse it), so the API marks the run and the lease holder sees the mark on its next heartbeat. `limits` stores the limits in force (the request's, capped by the server's) so they survive a config change.
+15. **`failure_reason` has one value beyond the spec's list: `key_revoked`**, for a run whose API key was revoked mid-run. The column has no check constraint, so no migration is needed.
+16. **`POST /v1/runs` refuses `tools` until the tool registry exists** (Phase 12), instead of accepting names it cannot offer. The engine already runs tool steps behind a `ToolRunner` interface, tested with a stub; Phase 9 supplies the HTTP executor. Until then a run is a single model call, so only the deadline can trip from the CLI; the other limits are covered by the engine tests.
+17. **The `spillway runs` CLI is an HTTP client** (`--url`, `--key`), so it exercises the same path and the same key-scoped visibility as any API client, rather than reading the database.
+18. **`waiting_tool` is a projection of "a tool call is open"**, set by the tool step's rows without a separate `run_status` row, so a tool step does not double its rows.
 13. **The tool registry has no screen** in the final design, so Phase 12 manages tools through the API and CLI. Adding a screen needs a design first.
 8. **MCP idempotency** depends on the server honouring `spillway/idempotencyKey`. Exactly-once for side effects is guaranteed only for receivers that deduplicate by key; the chaos test measures that against a receiver that does.

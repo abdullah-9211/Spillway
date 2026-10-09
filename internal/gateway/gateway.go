@@ -243,6 +243,7 @@ type call struct {
 	req     *provider.ChatRequest
 	model   Model // the model that answered; before that, the first candidate
 	started time.Time
+	runID   *uuid.UUID // set when the request is a step of a run
 	span    trace.Span
 
 	cacheStatus usage.CacheStatus // miss or bypass until a hit
@@ -266,7 +267,7 @@ func (g *Gateway) begin(ctx context.Context, key keys.Key, id uuid.UUID, bucket 
 		attribute.String("spillway.key_prefix", key.Prefix),
 		attribute.Bool("spillway.stream", req.Stream),
 	))
-	return ctx, &call{g: g, key: key, id: id, plan: plan, req: req, model: plan.Candidates[0], started: g.now(),
+	return ctx, &call{g: g, key: key, id: id, plan: plan, req: req, model: plan.Candidates[0], started: g.now(), runID: runFrom(ctx),
 		span: span, cacheStatus: usage.CacheBypass}, nil
 }
 
@@ -303,7 +304,7 @@ func (c *call) record(f finished) money.Micros {
 	}
 	latency := g.now().Sub(c.started)
 	g.rec.Record(usage.Row{
-		ID: c.id, KeyID: c.key.ID, Policy: c.plan.Name, Provider: c.model.Provider, Model: c.model.ID,
+		ID: c.id, KeyID: c.key.ID, RunID: c.runID, Policy: c.plan.Name, Provider: c.model.Provider, Model: c.model.ID,
 		InputTokens: f.in, OutputTokens: f.out, Cost: cost, Saved: f.saved, LatencyMs: int(latency.Milliseconds()),
 		TTFBMs: f.ttfb, CacheStatus: f.cache, Outcome: f.outcome, Attempts: f.attempts, CreatedAt: c.started.UTC(),
 	})

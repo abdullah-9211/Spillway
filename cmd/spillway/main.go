@@ -17,6 +17,7 @@ commands:
   migrate   apply database migrations
   keys      create, list and revoke API keys
   seed      create the dashboard's admin and viewer accounts from SEED_* variables
+  runs      create, inspect and cancel runs over the API (create | get | steps | cancel)
 `
 
 func main() {
@@ -40,6 +41,8 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 		err = keysCmd(ctx, args[1:], getenv, stdout, stderr)
 	case "seed":
 		err = seedCmd(ctx, args[1:], getenv, stdout, stderr)
+	case "runs":
+		err = runsCmd(ctx, args[1:], getenv, os.Stdin, stdout, stderr)
 	case "-h", "--help", "help":
 		fmt.Fprint(stdout, helpText)
 		return 0

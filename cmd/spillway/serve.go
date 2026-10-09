@@ -18,6 +18,7 @@ import (
 	"github.com/abdullah-9211/spillway/internal/keys"
 	"github.com/abdullah-9211/spillway/internal/playground"
 	"github.com/abdullah-9211/spillway/internal/provider"
+	"github.com/abdullah-9211/spillway/internal/runs"
 	"github.com/abdullah-9211/spillway/internal/telemetry"
 	"github.com/abdullah-9211/spillway/internal/usage"
 
@@ -70,8 +71,10 @@ func serve(ctx context.Context, args []string, getenv func(string) string, errOu
 	var srv *http.Server
 	var writer *usage.Writer
 	var gw *gateway.Gateway
+	var poolDone chan struct{}
 	errc := make(chan error, 1)
-	if cfg.Role == "api" || cfg.Role == "all" {
+	// Both roles need the gateway: the api serves it over HTTP, a worker calls it in-process for a run's model calls.
+	if cfg.Role == "api" || cfg.Role == "worker" || cfg.Role == "all" {
 		cat, err := gateway.LoadCatalog(cfg.ConfigPath)
 		if err != nil {
 			return err
@@ -113,40 +116,59 @@ func serve(ctx context.Context, args []string, getenv func(string) string, errOu
 			log.Info("semantic cache off: no ollama provider configured to embed with")
 		}
 		gw.Use(opts)
+		keyStore := keys.NewStore(pg.Pool)
+		runStore := runs.NewStore(pg.Pool)
 
-		var admin *api.Admin
-		if secret := getenv("ADMIN_SESSION_SECRET"); secret == "" {
-			log.Warn("admin API off: ADMIN_SESSION_SECRET is not set, so the dashboard cannot sign in")
-		} else {
-			signer, err := auth.NewSigner([]byte(secret))
-			if err != nil {
-				return err
+		if cfg.Role == "worker" || cfg.Role == "all" {
+			workers := cfg.Workers
+			if workers <= 0 {
+				workers = cat.Runs.Workers
 			}
-			if err := seedUsers(ctx, pg.Pool, getenv, false, log); err != nil {
-				return fmt.Errorf("seed users: %w", err)
-			}
-			keyStore := keys.NewStore(pg.Pool)
-			budget, rpm := cat.Playground.Budget, cat.Playground.RateLimitRPM
-			pkey, err := keyStore.EnsureBuiltin(ctx, &rpm, &budget)
-			if err != nil {
-				return err
-			}
-			pg_ := playground.NewService(gw, func(context.Context) (keys.Key, error) { return pkey, nil }, playground.NewStore(pg.Pool), cat.Playground.FaultInjection, log)
-			admin = api.NewAdmin(api.AdminDeps{Users: auth.NewUsers(pg.Pool, auth.DefaultParams), Keys: keyStore, Usage: usage.NewReader(pg.Pool), Health: gw.ProviderHealth, Latency: metrics,
-				Playground: &api.PlaygroundDeps{Service: pg_, Catalog: gw.Catalog, Key: func(ctx context.Context, now time.Time) (keys.Stats, error) { return keyStore.Stats(ctx, pkey.ID, now) }},
-				Signer:     signer, Deps: deps, Log: log})
+			eng := &runs.Engine{Model: &runs.GatewayCaller{GW: gw, Keys: keyStore}, Log: log, ToolBudget: cat.Runs.ToolErrorBudget}
+			pool := runs.NewPool(runStore, eng, runs.PoolOptions{Workers: workers, LeaseTTL: cat.Runs.LeaseTTL, Heartbeat: cat.Runs.Heartbeat, Log: log})
+			poolDone = make(chan struct{})
+			go func() {
+				defer close(poolDone)
+				pool.Run(ctx)
+			}()
+		}
+		if cfg.Role == "worker" {
+			log.Info("worker role: no HTTP listener", "role", cfg.Role)
 		}
 
-		ln, err := net.Listen("tcp", cfg.Addr)
-		if err != nil {
-			return fmt.Errorf("listen: %w", err)
+		if cfg.Role != "worker" {
+			var admin *api.Admin
+			if secret := getenv("ADMIN_SESSION_SECRET"); secret == "" {
+				log.Warn("admin API off: ADMIN_SESSION_SECRET is not set, so the dashboard cannot sign in")
+			} else {
+				signer, err := auth.NewSigner([]byte(secret))
+				if err != nil {
+					return err
+				}
+				if err := seedUsers(ctx, pg.Pool, getenv, false, log); err != nil {
+					return fmt.Errorf("seed users: %w", err)
+				}
+				budget, rpm := cat.Playground.Budget, cat.Playground.RateLimitRPM
+				pkey, err := keyStore.EnsureBuiltin(ctx, &rpm, &budget)
+				if err != nil {
+					return err
+				}
+				pg_ := playground.NewService(gw, func(context.Context) (keys.Key, error) { return pkey, nil }, playground.NewStore(pg.Pool), cat.Playground.FaultInjection, log)
+				admin = api.NewAdmin(api.AdminDeps{Users: auth.NewUsers(pg.Pool, auth.DefaultParams), Keys: keyStore, Usage: usage.NewReader(pg.Pool), Health: gw.ProviderHealth, Latency: metrics,
+					Playground: &api.PlaygroundDeps{Service: pg_, Catalog: gw.Catalog, Key: func(ctx context.Context, now time.Time) (keys.Stats, error) { return keyStore.Stats(ctx, pkey.ID, now) }},
+					Signer:     signer, Deps: deps, Log: log})
+			}
+
+			ln, err := net.Listen("tcp", cfg.Addr)
+			if err != nil {
+				return fmt.Errorf("listen: %w", err)
+			}
+			handler := api.NewHandler(api.Options{Deps: deps, Gateway: gw, Auth: keyStore, Log: log, Metrics: metrics.Handler(), Admin: admin,
+				Runs: &api.RunsOptions{Store: runStore, Caps: runs.Caps{MaxSteps: cat.Runs.MaxSteps, MaxCost: cat.Runs.MaxCost, Deadline: cat.Runs.Deadline}, Known: cat.Has}})
+			srv = &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+			go func() { errc <- srv.Serve(ln) }()
+			log.Info("listening", "addr", ln.Addr().String(), "role", cfg.Role)
 		}
-		handler := api.NewHandler(api.Options{Deps: deps, Gateway: gw, Auth: keys.NewStore(pg.Pool), Log: log, Metrics: metrics.Handler(), Admin: admin})
-		srv = &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
-		go func() { errc <- srv.Serve(ln) }()
-		log.Info("listening", "addr", ln.Addr().String(), "role", cfg.Role)
-	} else {
-		log.Info("worker role: no HTTP listener in this phase", "role", cfg.Role)
 	}
 
 	select {
@@ -163,6 +185,9 @@ func serve(ctx context.Context, args []string, getenv func(string) string, errOu
 	var errs []error
 	if srv != nil {
 		errs = append(errs, srv.Shutdown(shutdownCtx))
+	}
+	if poolDone != nil {
+		<-poolDone // the pool stops on the same signal; wait for its grace period before the usage buffer closes
 	}
 	if gw != nil {
 		gw.WaitForFills() // cache writes started by the last requests

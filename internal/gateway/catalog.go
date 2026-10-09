@@ -34,6 +34,7 @@ type fileConfig struct {
 	Breaker    breakerConfig             `yaml:"breaker"`
 	Cache      cacheConfig               `yaml:"cache"`
 	Playground playgroundConfig          `yaml:"playground"`
+	Runs       runsConfig                `yaml:"runs"`
 }
 
 type providerConfig struct {
@@ -80,6 +81,57 @@ type playgroundConfig struct {
 	MonthlyBudgetUSD usdPerMtok `yaml:"monthly_budget_usd"` // read as a dollar amount; the type is shared with prices
 	RateLimitRPM     int        `yaml:"rate_limit_rpm"`
 	FaultInjection   *bool      `yaml:"fault_injection"`
+}
+
+type runsConfig struct {
+	LeaseTTL        time.Duration `yaml:"lease_ttl"`
+	Heartbeat       time.Duration `yaml:"heartbeat"`
+	Workers         int           `yaml:"workers"`
+	MaxSteps        int           `yaml:"max_steps"`
+	MaxCostUSD      usdPerMtok    `yaml:"max_cost_usd"` // read as a dollar amount; the type is shared with prices
+	Deadline        time.Duration `yaml:"deadline"`
+	ToolErrorBudget int           `yaml:"tool_error_budget"`
+}
+
+// RunSettings are the run engine's timing and the caps no request can exceed.
+type RunSettings struct {
+	LeaseTTL        time.Duration
+	Heartbeat       time.Duration
+	Workers         int
+	MaxSteps        int
+	MaxCost         money.Micros
+	Deadline        time.Duration
+	ToolErrorBudget int
+}
+
+func (r runsConfig) settings() (RunSettings, error) {
+	s := RunSettings{LeaseTTL: r.LeaseTTL, Heartbeat: r.Heartbeat, Workers: r.Workers, MaxSteps: r.MaxSteps,
+		MaxCost: money.Micros(r.MaxCostUSD), Deadline: r.Deadline, ToolErrorBudget: r.ToolErrorBudget}
+	if s.LeaseTTL <= 0 {
+		s.LeaseTTL = 30 * time.Second
+	}
+	if s.Heartbeat <= 0 {
+		s.Heartbeat = 10 * time.Second
+	}
+	if s.Workers <= 0 {
+		s.Workers = 8
+	}
+	if s.MaxSteps <= 0 {
+		s.MaxSteps = 50
+	}
+	if s.MaxCost <= 0 {
+		s.MaxCost = 1_000_000
+	}
+	if s.Deadline <= 0 {
+		s.Deadline = 15 * time.Minute
+	}
+	if s.ToolErrorBudget <= 0 {
+		s.ToolErrorBudget = 3
+	}
+	if s.Heartbeat*2 > s.LeaseTTL {
+		return s, fmt.Errorf("runs.heartbeat (%s) must be at most half of runs.lease_ttl (%s), or a healthy worker could lose its lease", s.Heartbeat, s.LeaseTTL)
+	}
+	return s, nil
 }
 
 type cacheConfig struct {
@@ -150,6 +202,7 @@ type Catalog struct {
 	Breaker    BreakerConfig
 	Cache      CacheSettings
 	Playground PlaygroundSettings
+	Runs       RunSettings
 }
 
 var policyTypes = map[string]bool{"fixed": true, "fallback": true, "cheapest": true, "weighted": true}
@@ -183,6 +236,11 @@ func ParseCatalog(raw []byte) (*Catalog, error) {
 	if f.Playground.FaultInjection != nil {
 		c.Playground.FaultInjection = *f.Playground.FaultInjection
 	}
+	rs, err := f.Runs.settings()
+	if err != nil {
+		return nil, err
+	}
+	c.Runs = rs
 	if c.Cache.TTL <= 0 {
 		c.Cache.TTL = 24 * time.Hour
 	}
@@ -287,6 +345,13 @@ func ParseCatalog(raw []byte) (*Catalog, error) {
 		c.Policies[p.Name] = pol
 	}
 	return c, nil
+}
+
+// Has reports whether name is a model id or a policy name, the two things a request's model field may be.
+func (c *Catalog) Has(name string) bool {
+	_, m := c.Models[name]
+	_, p := c.Policies[name]
+	return m || p
 }
 
 // Names lists model ids and policy names, sorted.

@@ -16,6 +16,7 @@ type Config struct {
 	DatabaseURL string
 	RedisURL    string // empty disables Redis-backed features
 	LogLevel    slog.Level
+	Workers     int // run workers in this process; 0 means the catalog's runs.workers
 }
 
 var validRoles = map[string]bool{"api": true, "worker": true, "all": true}
@@ -36,6 +37,7 @@ func parseConfig(name string, args []string, getenv func(string) string, errOut 
 	cfgPath := fs.String("config", env("SPILLWAY_CONFIG", "config/models.yaml"), "model catalog path")
 	dbURL := fs.String("database-url", env("DATABASE_URL", ""), "Postgres URL")
 	redisURL := fs.String("redis-url", env("REDIS_URL", ""), "Redis URL (optional)")
+	workers := fs.Int("workers", 0, "run workers in this process (default: runs.workers in the catalog)")
 	level := fs.String("log-level", env("LOG_LEVEL", "info"), "debug, info, warn or error")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
@@ -44,12 +46,15 @@ func parseConfig(name string, args []string, getenv func(string) string, errOut 
 	if !validRoles[*role] {
 		return Config{}, fmt.Errorf("invalid role %q: want api, worker or all", *role)
 	}
+	if *workers < 0 {
+		return Config{}, fmt.Errorf("--workers must not be negative")
+	}
 	var lvl slog.Level
 	if err := lvl.UnmarshalText([]byte(strings.ToLower(*level))); err != nil {
 		return Config{}, fmt.Errorf("invalid log level %q", *level)
 	}
 	return Config{
 		Role: *role, Addr: *addr, ConfigPath: *cfgPath,
-		DatabaseURL: *dbURL, RedisURL: *redisURL, LogLevel: lvl,
+		DatabaseURL: *dbURL, RedisURL: *redisURL, LogLevel: lvl, Workers: *workers,
 	}, nil
 }

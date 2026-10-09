@@ -61,3 +61,6 @@ gateway: { request_timeout: 60s, first_byte_timeout: 15s, idle_timeout: 30s, max
 breaker: { consecutive_failures: 5, error_rate: 0.5, window: 20, open_for: 30s }
 cache: { exact_ttl: 24h, scope: key, semantic_threshold: 0.95 }
 playground: { key: playground, monthly_budget_usd: 5, rate_limit_rpm: 20, fault_injection: true }
+
+# The run engine: how long a worker's lease lasts, how often it renews it, and the caps no run request can exceed.
+runs: { lease_ttl: 30s, heartbeat: 10s, workers: 8, max_steps: 50, max_cost_usd: 1.0, deadline: 15m, tool_error_budget: 3 }

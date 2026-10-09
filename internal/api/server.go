@@ -39,6 +39,8 @@ type Options struct {
 	Metrics http.Handler
 	// Admin, when set, serves the dashboard's API under /admin/.
 	Admin *Admin
+	// Runs, when set (with Auth), serves /v1/runs.
+	Runs *RunsOptions
 }
 
 // NewHandler builds the router. Required dependencies that fail their ping turn /healthz into a 503;
@@ -59,6 +61,9 @@ func NewHandler(o Options) http.Handler {
 		v1 := &v1{gw: o.Gateway, auth: o.Auth, log: o.Log}
 		mux.Handle("POST /v1/chat/completions", v1.withRequest(v1.chatCompletions))
 		mux.Handle("GET /v1/models", v1.withRequest(v1.models))
+	}
+	if o.Runs != nil && o.Auth != nil {
+		(&runsAPI{RunsOptions: *o.Runs, v1: &v1{auth: o.Auth, log: o.Log}, log: o.Log}).register(mux)
 	}
 	return mux
 }
