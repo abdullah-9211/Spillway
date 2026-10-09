@@ -8,6 +8,19 @@ import { RoleProvider } from "@/lib/role";
 import { PlaygroundView } from "./PlaygroundView";
 import { RouteTrace } from "./RouteTrace";
 
+// The three.js stage needs WebGL, which jsdom does not have. The stand-in reports the replay finished at once and
+// lets a test click a provider, as the real stage does.
+vi.mock("./RouteScene", () => ({
+  RouteScene: ({ nodes, phase, onDone, onNode }: { nodes: { id: string; label: string; provider?: string }[]; phase: string; onDone?: () => void; onNode?: (p: string) => void }) => {
+    if (phase === "playing") queueMicrotask(() => onDone?.());
+    return (
+      <div data-testid="scene" data-phase={phase}>
+        {nodes.map((n) => (n.provider && onNode ? <button key={n.id} type="button" onClick={() => onNode(n.provider as string)}>{`stage ${n.label}`}</button> : <span key={n.id}>{n.label}</span>))}
+      </div>
+    );
+  },
+}));
+
 const state: PlaygroundState = {
   key: { prefix: "spw_play", monthly_budget_usd: "5.000000", spend_usd: "0.840000", rate_limit_rpm: 20 },
   fault_injection: true,
@@ -74,6 +87,28 @@ describe("PlaygroundView as an admin", () => {
     expect(screen.getByText("1 fault will be injected")).toBeInTheDocument();
     await u.click(screen.getByRole("button", { name: /cheap-fast/ }));
     expect(screen.queryByRole("button", { name: "Anthropic returns 429" })).not.toBeInTheDocument();
+    expect(screen.getByText("No faults")).toBeInTheDocument();
+  });
+
+  it("clicking a provider on the stage cycles its fault: 429, 503, slow, then off", async () => {
+    const u = userEvent.setup();
+    view("admin");
+    const kinds = ["Anthropic returns 429", "Anthropic returns 503", "Slow response"];
+    for (const k of kinds) {
+      await u.click(screen.getByRole("button", { name: "stage sonnet" }));
+      expect(screen.getByRole("button", { name: k })).toHaveAttribute("aria-pressed", "true");
+    }
+    await u.click(screen.getByRole("button", { name: "stage sonnet" }));
+    expect(screen.getByText("No faults")).toBeInTheDocument();
+  });
+
+  it("Surprise me fills in a prompt and some faults, and Clear faults removes them", async () => {
+    const u = userEvent.setup();
+    view("admin");
+    await u.click(screen.getByRole("button", { name: "Surprise me" }));
+    expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).value).not.toBe("");
+    expect(screen.getByText(/will be injected/)).toBeInTheDocument();
+    await u.click(screen.getByRole("button", { name: "Clear faults" }));
     expect(screen.getByText("No faults")).toBeInTheDocument();
   });
 

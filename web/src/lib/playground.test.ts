@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   answerFor, chipsFor, hopsFor, keepFaults, recentMeta, requestBody, segmentsFor, timingLabel, toggleFault, validate,
-  emptyOptions, type Attempt, type PlaygroundResult,
+  emptyOptions, surprise, type Attempt, type PlaygroundResult,
 } from "./playground";
 
 const ok = (over: Partial<Attempt> = {}): Attempt => ({ provider: "openai", model: "mini", kind: "fallback", latency_ms: 1060, ...over });
@@ -117,6 +117,24 @@ describe("validate and requestBody", () => {
     expect(requestBody("default", " hi ", emptyOptions, [])).toEqual({ policy: "default", prompt: "hi" });
     const full = requestBody("hedged", "hi", { system: " be brief ", temperature: "0", maxTokens: "50" }, [{ provider: "openai", kind: "cut_stream" }]);
     expect(full).toEqual({ policy: "hedged", prompt: "hi", system: "be brief", temperature: 0, max_tokens: 50, stream: true, faults: [{ provider: "openai", kind: "cut_stream" }] });
+  });
+});
+
+describe("surprise", () => {
+  const seq = (...v: number[]) => { let i = 0; return () => v[i++ % v.length]; };
+  it("picks a prompt other than the current one and breaks at most all-but-one provider", () => {
+    for (let i = 0; i < 40; i++) {
+      const s = surprise(["a", "b", "c"], "Write a haiku about a failing API");
+      expect(s.prompt).not.toBe("Write a haiku about a failing API");
+      expect(s.faults.length).toBeGreaterThanOrEqual(1);
+      expect(s.faults.length).toBeLessThanOrEqual(2);
+      expect(new Set(s.faults.map((f) => f.provider)).size).toBe(s.faults.length);
+    }
+  });
+  it("leaves one provider working on a two-provider route, and breaks the only one on a one-provider route", () => {
+    for (let i = 0; i < 20; i++) expect(surprise(["a", "b"], "").faults).toHaveLength(1);
+    expect(surprise(["a"], "", seq(0.1)).faults).toHaveLength(1);
+    expect(surprise([], "").faults).toEqual([]);
   });
 });
 

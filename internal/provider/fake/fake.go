@@ -33,9 +33,11 @@ const defaultText = "Hello from the fake provider"
 type Provider struct {
 	name string
 
-	mu       sync.Mutex
-	script   []Behavior
-	Default  Behavior
+	mu      sync.Mutex
+	script  []Behavior
+	Default Behavior
+	// Reply, when set, writes the answer for a request whose behavior has no text of its own.
+	Reply    func(*provider.ChatRequest) string
 	requests []*provider.ChatRequest
 
 	canceled atomic.Int64
@@ -71,9 +73,16 @@ func (p *Provider) next(req *provider.ChatRequest) Behavior {
 	if len(p.script) > 0 {
 		b := p.script[0]
 		p.script = p.script[1:]
-		return b
+		return p.reply(b, req)
 	}
-	return p.Default
+	return p.reply(p.Default, req)
+}
+
+func (p *Provider) reply(b Behavior, req *provider.ChatRequest) Behavior {
+	if b.Text == "" && len(b.ToolCalls) == 0 && p.Reply != nil {
+		b.Text = p.Reply(req)
+	}
+	return b
 }
 
 func (b Behavior) tokens() (int, int) {

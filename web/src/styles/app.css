@@ -511,3 +511,26 @@ button.lg:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; 
 .hr .q { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hr .m { display: flex; justify-content: space-between; gap: 8px; color: var(--mute); font-size: 12px; }
 @media (max-width: 640px) { .opts { grid-template-columns: 1fr; } .trace { overflow-x: auto; } }
+
+/* --- playground stage (three.js) --- */
+.scene-panel { overflow: hidden; }
+.scene { position: relative; width: 100%; }
+.scene__canvas { display: block; position: absolute; inset: 0; }
+.scene__off { position: absolute; top: 12px; left: 16px; }
+.scene__labels { list-style: none; margin: 0; padding: 0; position: absolute; inset: 0; pointer-events: none; }
+.scene__lab { position: absolute; top: calc(62% + 14px); transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 2px; max-width: 120px; text-align: center; }
+.scene__lab.fail .hn { color: var(--text); }
+.scene__lab.skip { opacity: 0.6; }
+.scene__fault {
+  font-size: 11px; font-weight: 500; color: var(--text); border: 1px solid var(--fail); border-radius: var(--r-pill); padding: 0 8px;
+  background: color-mix(in srgb, var(--fail) 10%, transparent);
+}
+.scene__bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 24px; padding: 8px 16px 12px; border-top: 1px solid var(--line); }
+.scene__bar .link-btn { margin-left: auto; }
+.scene__bar .link-btn:disabled { opacity: 0.5; cursor: default; }
+.ans--typing { cursor: pointer; }
+.caret { display: inline-block; width: 7px; height: 1.05em; margin-left: 2px; vertical-align: text-bottom; background: var(--accent); animation: caret 0.9s steps(2, start) infinite; }
+@keyframes caret { to { visibility: hidden; } }
+.ai { animation: rise 0.35s ease-out; }
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } }
+@media (prefers-reduced-motion: reduce) { .ai { animation: none; } .caret { animation: none; } }

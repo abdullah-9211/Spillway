@@ -13,12 +13,15 @@ import (
 
 func main() {
 	addr := flag.String("addr", ":9999", "listen address")
-	text := flag.String("text", "", "default answer text")
+	text := flag.String("text", "", "one fixed answer for every request (default: an answer that depends on the prompt)")
 	delay := flag.Duration("delay", 0, "default latency added to every answer")
 	flag.Parse()
 
 	p := fake.New("fake")
 	p.Default = fake.Behavior{Text: *text, Delay: *delay}
+	if *text == "" {
+		p.Reply = reply // without -text, answer according to the prompt and model
+	}
 	srv := &http.Server{Addr: *addr, Handler: fake.NewHandler(p), ReadHeaderTimeout: 10 * time.Second}
 	log.Printf("fake provider listening on %s", *addr)
 	log.Fatal(srv.ListenAndServe())

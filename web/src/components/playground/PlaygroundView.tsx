@@ -3,12 +3,15 @@
 import { useEffect, useRef, useState } from "react";
 import { usd } from "@/lib/format";
 import {
-  SUGGESTIONS, MAX_PROMPT, answerFor, chipsFor, emptyOptions, keepFaults, providerLabel, recentMeta, requestBody, toggleFault, validate,
+  SUGGESTIONS, MAX_PROMPT, surprise, answerFor, chipsFor, emptyOptions, keepFaults, providerLabel, recentMeta, requestBody, toggleFault, validate,
   type Fault, type HistoryItem, type Options, type PlaygroundResult, type PlaygroundState,
 } from "@/lib/playground";
 import { useRole } from "@/lib/role";
 import { dollarsOf, microsOf } from "@/lib/usage";
 import { Button } from "../ui";
+import { nextFault, planNodes, runNodes } from "@/lib/scene";
+import { Reveal } from "./Reveal";
+import { RouteScene, type ScenePhase } from "./RouteScene";
 import { RouteTrace } from "./RouteTrace";
 
 type Shown = { prompt: string; result: PlaygroundResult };
@@ -30,19 +33,62 @@ export function PlaygroundView({ state, history, nextCursor }: { state: Playgrou
   const [more, setMore] = useState(false);
   const [spend, setSpend] = useState(state.key.spend_usd);
   const resultRef = useRef<HTMLElement>(null);
+  const [phase, setPhase] = useState<ScenePhase>("idle");
+  const [playKey, setPlayKey] = useState(0);
+  const [played, setPlayed] = useState(true);
+  const [fresh, setFresh] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const [tally, setTally] = useState({ sent: 0, survived: 0 });
   const current = policies.find((p) => p.name === policy);
   const sending = asking !== null;
   const chips = state.fault_injection && current ? chipsFor(current.providers) : [];
   const fieldErrors = validate(prompt, opts);
 
   useEffect(() => {
-    if (shown) resultRef.current?.focus({ preventScroll: false });
-  }, [shown]);
+    if (shown && played) resultRef.current?.focus({ preventScroll: true });
+  }, [shown, played]);
+
+  // A running clock while a prompt is out, so waiting is visible.
+  useEffect(() => {
+    if (!sending) return;
+    const t0 = performance.now();
+    const id = window.setInterval(() => setElapsed(performance.now() - t0), 100);
+    return () => window.clearInterval(id);
+  }, [sending]);
+
+  const idle = () => setPhase((p) => (p === "waiting" || p === "playing" ? p : "idle"));
+  const onDone = () => {
+    setPhase("done");
+    setPlayed(true);
+  };
+  function replay() {
+    if (!shown) return;
+    setFresh(false);
+    setPlayed(false);
+    setPlayKey((k) => k + 1);
+    setPhase("playing");
+  }
+  function cycle(provider: string) {
+    if (!isAdmin || sending || !state.fault_injection) return;
+    setFaults((f) => {
+      const k = nextFault(f.find((x) => x.provider === provider)?.kind);
+      const rest = f.filter((x) => x.provider !== provider);
+      return k ? [...rest, { provider, kind: k }] : rest;
+    });
+    idle();
+  }
+  function roll() {
+    const s = surprise(current?.providers ?? [], prompt);
+    setFaults(s.faults);
+    setPrompt(s.prompt);
+    idle();
+  }
 
   function choose(name: string) {
     setPolicy(name);
     const p = policies.find((x) => x.name === name);
     if (p) setFaults((f) => keepFaults(f, p.providers));
+    idle();
   }
 
   async function send() {
@@ -53,18 +99,28 @@ export function PlaygroundView({ state, history, nextCursor }: { state: Playgrou
     }
     const text = prompt.trim();
     setAsking(text);
+    setElapsed(0);
+    setPhase("waiting");
     try {
       const res = await fetch("/api/playground/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(requestBody(policy, text, opts, faults)) });
       const data = (await res.json().catch(() => ({}))) as PlaygroundResult & { message?: string };
       if (!res.ok) {
         setError(data.message ?? "Something went wrong. Try again.");
+        setPhase("idle");
         return;
       }
       setShown({ prompt: text, result: data });
+      setFresh(true);
+      setPlayed(false);
+      setPlayKey((k) => k + 1);
+      setPhase("playing");
+      const hit = data.attempts.some((a) => a.injected && a.error_kind);
+      setTally((t) => ({ sent: t.sent + 1, survived: t.survived + (hit && data.answer && !data.error ? 1 : 0) }));
       setRecent((r) => [{ ...data, prompt: text, system: opts.system.trim() }, ...r]);
       setSpend((s) => dollarsOf(microsOf(s) + microsOf(data.cost_usd)));
     } catch {
       setError("Could not reach the dashboard. Check your connection and try again.");
+      setPhase("idle");
     } finally {
       setAsking(null);
     }
@@ -90,6 +146,8 @@ export function PlaygroundView({ state, history, nextCursor }: { state: Playgrou
     }
   }
 
+  const showRun = shown && (phase === "playing" || phase === "done");
+  const nodes = showRun ? runNodes(shown.result) : planNodes(current, faults);
   const budget = state.key.monthly_budget_usd;
   const answer = shown ? answerFor(shown.result) : null;
 
@@ -126,15 +184,29 @@ export function PlaygroundView({ state, history, nextCursor }: { state: Playgrou
         <div className="stage">
           {(asking ?? shown?.prompt) && <div className="me">{asking ?? shown?.prompt}</div>}
 
-          {sending && (
-            <section className="panel ai" aria-live="polite">
-              <p className="ans mute">Waiting for the answer…</p>
-            </section>
-          )}
+          <section className="panel scene-panel" aria-label="The route, animated">
+            <RouteScene nodes={nodes} phase={phase} playKey={playKey} onDone={onDone} onNode={isAdmin && state.fault_injection && !sending ? cycle : undefined} />
+            <div className="scene__bar">
+              <p className="small" aria-live="polite">
+                {sending
+                  ? `Waiting for an answer… ${(elapsed / 1000).toFixed(1)} s`
+                  : phase === "playing"
+                    ? "Following the route…"
+                    : isAdmin && state.fault_injection
+                      ? "Click a provider to make it fail, then send a prompt."
+                      : "The route a request would take."}
+              </p>
+              <p className="small num">
+                {tally.sent > 0 && `Sent ${tally.sent}, faults survived ${tally.survived}`}
+              </p>
+              {shown && !sending && (
+                <button type="button" className="link-btn" onClick={replay} disabled={phase === "playing"}>Replay</button>
+              )}
+            </div>
+          </section>
 
-          {!sending && shown && answer && (
+          {!sending && shown && answer && played && (
             <section className="panel ai" aria-label="Answer and route" tabIndex={-1} ref={resultRef}>
-              <RouteTrace result={shown.result} />
               {answer.failed && (
                 <div className="err" role="alert">
                   <span>
@@ -143,7 +215,7 @@ export function PlaygroundView({ state, history, nextCursor }: { state: Playgrou
                   </span>
                 </div>
               )}
-              {answer.text && !(answer.failed && !answer.partial) && <p className="ans">{answer.text}</p>}
+              {answer.text && !(answer.failed && !answer.partial) && <Reveal key={shown.result.id + playKey} text={answer.text} animate={fresh} />}
               <div className="facts num">
                 {shown.result.model && (
                   <span>
@@ -160,17 +232,12 @@ export function PlaygroundView({ state, history, nextCursor }: { state: Playgrou
                   Cache <b>{shown.result.cache === "miss" ? "miss" : shown.result.cache === "bypass" ? "bypassed" : "hit"}</b>
                 </span>
               </div>
+              <RouteTrace result={shown.result} />
               {shown.result.unused_faults.length > 0 && (
                 <p className="small">
                   Not used, because this policy never tries them: {shown.result.unused_faults.map((f) => providerLabel(f.provider)).join(", ")}.
                 </p>
               )}
-            </section>
-          )}
-
-          {!sending && !shown && (
-            <section className="panel ai">
-              <p className="ans mute">Pick a policy, break a provider if you like, and send a prompt. The route it takes shows up here.</p>
             </section>
           )}
 
@@ -190,7 +257,7 @@ export function PlaygroundView({ state, history, nextCursor }: { state: Playgrou
                 {chips.map((c) => {
                   const on = faults.some((f) => f.provider === c.fault.provider && f.kind === c.fault.kind);
                   return (
-                    <button key={c.id} type="button" className={`cz ${on ? "on" : ""}`.trim()} aria-pressed={on} disabled={!isAdmin || sending} onClick={() => setFaults((f) => toggleFault(f, c.fault))}>
+                    <button key={c.id} type="button" className={`cz ${on ? "on" : ""}`.trim()} aria-pressed={on} disabled={!isAdmin || sending} onClick={() => { setFaults((f) => toggleFault(f, c.fault)); idle(); }}>
                       <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                         <path d="M7 1L2.5 7H6l-1 4L9.5 5H6z" />
                       </svg>
@@ -224,6 +291,8 @@ export function PlaygroundView({ state, history, nextCursor }: { state: Playgrou
                 {faults.length > 0 ? `${faults.length} ${faults.length === 1 ? "fault" : "faults"} will be injected` : "No faults"}
               </p>
               <div className="ctl__btns">
+                {faults.length > 0 && isAdmin && <button type="button" className="link-btn" onClick={() => { setFaults([]); idle(); }}>Clear faults</button>}
+                <Button type="button" disabled={!isAdmin || sending} onClick={roll} title="Pick a random prompt and break something">Surprise me</Button>
                 <Button type="button" disabled={!isAdmin} aria-expanded={showOpts} onClick={() => setShowOpts((s) => !s)}>Options</Button>
                 <Button type="button" variant="primary" disabled={!isAdmin || sending} onClick={() => void send()}>{sending ? "Sending…" : "Send"}</Button>
               </div>
@@ -255,7 +324,7 @@ export function PlaygroundView({ state, history, nextCursor }: { state: Playgrou
           <ul className="hist">
             {recent.map((h) => (
               <li key={h.id}>
-                <button type="button" className={`hr ${shown?.result.id === h.id ? "on" : ""}`.trim()} onClick={() => { setShown({ prompt: h.prompt, result: h }); setError(null); }}>
+                <button type="button" className={`hr ${shown?.result.id === h.id ? "on" : ""}`.trim()} onClick={() => { setShown({ prompt: h.prompt, result: h }); setError(null); setFresh(false); setPlayed(true); setPhase("done"); }}>
                   <span className="q">{h.prompt}</span>
                   <span className="m num">
                     <span>{recentMeta(h)}</span>

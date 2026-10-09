@@ -14,6 +14,27 @@ export const MAX_PROMPT = 8000;
 
 export const SUGGESTIONS = ["Summarise this changelog", "Write a SQL query for monthly active users", "Translate this error into plain English"];
 
+const IDEAS = [
+  "Write a haiku about a failing API",
+  "Tell me a joke about retries",
+  "Explain a circuit breaker in two sentences",
+  "Write a SQL query for monthly active users",
+  "Summarise this changelog in three bullets",
+  "Translate this error into plain English: permission denied",
+];
+
+/** A random prompt (never the same one twice in a row) and up to two faults on different providers of the route. */
+export function surprise(providers: string[], current: string, rand: () => number = Math.random): { prompt: string; faults: Fault[] } {
+  const pool = IDEAS.filter((p) => p !== current);
+  const prompt = pool[Math.floor(rand() * pool.length)];
+  const kinds: FaultKind[] = ["rate_limit", "server_error", "slow"];
+  const order = [...providers].sort(() => rand() - 0.5);
+  // Never break every provider on the route when there is a choice, so the surprise is a story and not only a failure.
+  const n = Math.min(1 + (rand() < 0.5 ? 1 : 0), Math.max(providers.length - 1, 1));
+  const faults = order.slice(0, n).map((provider) => ({ provider, kind: kinds[Math.floor(rand() * kinds.length)] }));
+  return { prompt, faults };
+}
+
 const GO = "M2 6h7M6 3l3 3-3 3";
 const OK = "M2.5 6.5l2.2 2.2L9.5 3.5";
 const X = "M3 3l6 6M9 3l-6 6";
