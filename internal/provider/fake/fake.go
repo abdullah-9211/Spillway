@@ -37,7 +37,10 @@ type Provider struct {
 	script  []Behavior
 	Default Behavior
 	// Reply, when set, writes the answer for a request whose behavior has no text of its own.
-	Reply    func(*provider.ChatRequest) string
+	Reply func(*provider.ChatRequest) string
+	// Decide, when set, chooses the whole behavior of a request from the request itself, once the script is used up.
+	// It lets a test play a conversation: ask for a tool while the history is short, then answer.
+	Decide   func(*provider.ChatRequest) Behavior
 	requests []*provider.ChatRequest
 
 	canceled atomic.Int64
@@ -74,6 +77,9 @@ func (p *Provider) next(req *provider.ChatRequest) Behavior {
 		b := p.script[0]
 		p.script = p.script[1:]
 		return p.reply(b, req)
+	}
+	if p.Decide != nil {
+		return p.reply(p.Decide(req), req)
 	}
 	return p.reply(p.Default, req)
 }

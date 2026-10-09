@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -33,6 +34,10 @@ type RunsOptions struct {
 	Known      func(model string) bool // a model id or policy name in the catalog
 	ToolsReady bool
 	Now        func() time.Time
+	// Events delivers live step rows to GET /v1/runs/{id}/events.
+	Events Events
+	// MissingTools returns which of the names are not in the tool registry. nil means no check.
+	MissingTools func(ctx context.Context, names []string) ([]string, error)
 }
 
 type runsAPI struct {
@@ -52,6 +57,7 @@ func (a *runsAPI) register(mux *http.ServeMux) {
 	mux.Handle("POST /v1/runs", a.v1.withRequest(a.create))
 	mux.Handle("GET /v1/runs/{id}", a.v1.withRequest(a.get))
 	mux.Handle("GET /v1/runs/{id}/steps", a.v1.withRequest(a.steps))
+	mux.Handle("GET /v1/runs/{id}/events", a.v1.withRequest(a.events))
 	mux.Handle("POST /v1/runs/{id}/cancel", a.v1.withRequest(a.cancel))
 }
 
@@ -143,6 +149,17 @@ func (a *runsAPI) create(w http.ResponseWriter, r *http.Request, key keys.Key, r
 		}
 		a.internal(w, reqID, "validate run request", err)
 		return
+	}
+	if a.MissingTools != nil && len(req.Tools) > 0 {
+		missing, err := a.MissingTools(r.Context(), req.Tools)
+		if err != nil {
+			a.internal(w, reqID, "check tools", err)
+			return
+		}
+		if len(missing) > 0 {
+			writeError(w, 400, "invalid_request_error", "invalid_request", "tools", fmt.Sprintf("Unknown tool %q. Register it before a run can use it.", missing[0]))
+			return
+		}
 	}
 	run, created, err := a.Store.Create(r.Context(), runs.CreateParams{KeyID: key.ID, IdempotencyKey: idem, Request: req, Raw: raw, Limits: req.ResolveLimits(a.Caps), Now: a.now()})
 	switch {

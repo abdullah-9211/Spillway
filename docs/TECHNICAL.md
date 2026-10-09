@@ -735,9 +735,9 @@ Two slices, each backend then frontend.
 
 ### Phase 9: tools, run events, chaos test
 *Backend only. First screen: Run graph, Phase 11.*
-- [ ] **BE** HTTP tool executor with idempotency key and signature; tool-call steps; the tool error feedback loop.
-- [ ] **BE** Run events: `NOTIFY` and `LISTEN`, SSE with `Last-Event-ID` replay.
-- [ ] **BE** `--role=api|worker|all`; the tool effects server and the chaos test harness.
+- [x] **BE** HTTP tool executor with idempotency key and signature; tool-call steps; the tool error feedback loop.
+- [x] **BE** Run events: `NOTIFY` and `LISTEN`, SSE with `Last-Event-ID` replay.
+- [x] **BE** `--role=api|worker|all`; the tool effects server and the chaos test harness.
 - [ ] **BE tests:** tool executor (signature, timeout, size truncation, idempotency key sent); SSE cursor replay and reconnect; role flags; the chaos test run with `-race` and kept in CI.
 
 **Verify with me**
@@ -817,5 +817,8 @@ These are the places where this document makes a call the spec left open or phra
 16. **`POST /v1/runs` refuses `tools` until the tool registry exists** (Phase 12), instead of accepting names it cannot offer. The engine already runs tool steps behind a `ToolRunner` interface, tested with a stub; Phase 9 supplies the HTTP executor. Until then a run is a single model call, so only the deadline can trip from the CLI; the other limits are covered by the engine tests.
 17. **The `spillway runs` CLI is an HTTP client** (`--url`, `--key`), so it exercises the same path and the same key-scoped visibility as any API client, rather than reading the database.
 18. **`waiting_tool` is a projection of "a tool call is open"**, set by the tool step's rows without a separate `run_status` row, so a tool step does not double its rows.
+19. **Tool signing secrets (Phase 9).** Calls are signed with `SPILLWAY_WEBHOOK_SECRET`; a tool may carry its own secret as an `X-Spillway-Signing-Secret` entry among its stored headers, which signs and is never sent. With no secret at all a call is unsigned. Redirects from a tool are not followed, so a registered endpoint cannot bounce a call to another host.
+20. **The registry has a store but no endpoints until Phase 12**, so Phase 9 tests register tools through `tools.Store`. `POST /v1/runs` accepts `tools` and refuses names that are not registered.
+21. **The chaos test is gated by the environment.** It runs in full when `CI` is set, reduced when `CHAOS_RUNS` is set (60 second cap, skipped and reported if exceeded), and is skipped otherwise. Its runs are nine steps (four tool calls, five model calls), not eight, so that a run ends on a model answer.
 13. **The tool registry has no screen** in the final design, so Phase 12 manages tools through the API and CLI. Adding a screen needs a design first.
 8. **MCP idempotency** depends on the server honouring `spillway/idempotencyKey`. Exactly-once for side effects is guaranteed only for receivers that deduplicate by key; the chaos test measures that against a receiver that does.

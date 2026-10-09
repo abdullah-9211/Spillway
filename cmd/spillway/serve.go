@@ -19,7 +19,9 @@ import (
 	"github.com/abdullah-9211/spillway/internal/playground"
 	"github.com/abdullah-9211/spillway/internal/provider"
 	"github.com/abdullah-9211/spillway/internal/runs"
+	"github.com/abdullah-9211/spillway/internal/secret"
 	"github.com/abdullah-9211/spillway/internal/telemetry"
+	"github.com/abdullah-9211/spillway/internal/tools"
 	"github.com/abdullah-9211/spillway/internal/usage"
 
 	// Provider adapters register themselves on import.
@@ -71,7 +73,7 @@ func serve(ctx context.Context, args []string, getenv func(string) string, errOu
 	var srv *http.Server
 	var writer *usage.Writer
 	var gw *gateway.Gateway
-	var poolDone chan struct{}
+	var poolDone, brokerDone chan struct{}
 	errc := make(chan error, 1)
 	// Both roles need the gateway: the api serves it over HTTP, a worker calls it in-process for a run's model calls.
 	if cfg.Role == "api" || cfg.Role == "worker" || cfg.Role == "all" {
@@ -118,13 +120,25 @@ func serve(ctx context.Context, args []string, getenv func(string) string, errOu
 		gw.Use(opts)
 		keyStore := keys.NewStore(pg.Pool)
 		runStore := runs.NewStore(pg.Pool)
+		var box *secret.Box
+		if k := getenv("SPILLWAY_SECRET_KEY"); k != "" {
+			raw, err := secret.ParseKey(k)
+			if err != nil {
+				return fmt.Errorf("SPILLWAY_SECRET_KEY: %w", err)
+			}
+			if box, err = secret.New(raw); err != nil {
+				return err
+			}
+		}
+		toolStore := tools.NewStore(pg.Pool, box)
 
 		if cfg.Role == "worker" || cfg.Role == "all" {
 			workers := cfg.Workers
 			if workers <= 0 {
 				workers = cat.Runs.Workers
 			}
-			eng := &runs.Engine{Model: &runs.GatewayCaller{GW: gw, Keys: keyStore}, Log: log, ToolBudget: cat.Runs.ToolErrorBudget}
+			eng := &runs.Engine{Model: &runs.GatewayCaller{GW: gw, Keys: keyStore}, Tools: &tools.Executor{Source: toolStore, WebhookSecret: getenv("SPILLWAY_WEBHOOK_SECRET")},
+				Log: log, ToolBudget: cat.Runs.ToolErrorBudget}
 			pool := runs.NewPool(runStore, eng, runs.PoolOptions{Workers: workers, LeaseTTL: cat.Runs.LeaseTTL, Heartbeat: cat.Runs.Heartbeat, Log: log})
 			poolDone = make(chan struct{})
 			go func() {
@@ -163,9 +177,18 @@ func serve(ctx context.Context, args []string, getenv func(string) string, errOu
 			if err != nil {
 				return fmt.Errorf("listen: %w", err)
 			}
+			broker := runs.NewBroker(pg.Pool, log)
+			brokerDone = make(chan struct{})
+			go func() {
+				defer close(brokerDone)
+				broker.Run(ctx)
+			}()
 			handler := api.NewHandler(api.Options{Deps: deps, Gateway: gw, Auth: keyStore, Log: log, Metrics: metrics.Handler(), Admin: admin,
-				Runs: &api.RunsOptions{Store: runStore, Caps: runs.Caps{MaxSteps: cat.Runs.MaxSteps, MaxCost: cat.Runs.MaxCost, Deadline: cat.Runs.Deadline}, Known: cat.Has}})
-			srv = &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+				Runs: &api.RunsOptions{Store: runStore, Caps: runs.Caps{MaxSteps: cat.Runs.MaxSteps, MaxCost: cat.Runs.MaxCost, Deadline: cat.Runs.Deadline}, Known: cat.Has, ToolsReady: true, MissingTools: toolStore.Missing, Events: broker}})
+			// Event streams last as long as the client stays; shutting down ends them, or Shutdown would wait for them.
+			streams, endStreams := context.WithCancel(context.Background())
+			srv = &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, BaseContext: func(net.Listener) context.Context { return streams }}
+			srv.RegisterOnShutdown(endStreams)
 			go func() { errc <- srv.Serve(ln) }()
 			log.Info("listening", "addr", ln.Addr().String(), "role", cfg.Role)
 		}
@@ -185,6 +208,9 @@ func serve(ctx context.Context, args []string, getenv func(string) string, errOu
 	var errs []error
 	if srv != nil {
 		errs = append(errs, srv.Shutdown(shutdownCtx))
+	}
+	if brokerDone != nil {
+		<-brokerDone // it holds a database connection until it stops
 	}
 	if poolDone != nil {
 		<-poolDone // the pool stops on the same signal; wait for its grace period before the usage buffer closes

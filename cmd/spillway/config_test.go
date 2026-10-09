@@ -22,6 +22,8 @@ func TestParseConfig(t *testing.T) {
 			Config{Role: "worker", Addr: ":8080", ConfigPath: "config/models.yaml", DatabaseURL: "postgres://x", RedisURL: "redis://y", LogLevel: slog.LevelDebug}, false},
 		{"flag beats env", []string{"--role=api", "--addr=:9000"}, map[string]string{"SPILLWAY_ROLE": "worker", "SPILLWAY_ADDR": ":1"},
 			Config{Role: "api", Addr: ":9000", ConfigPath: "config/models.yaml", LogLevel: slog.LevelInfo}, false},
+		{"worker count", []string{"--role=worker", "--workers=3"}, nil, Config{Role: "worker", Addr: ":8080", ConfigPath: "config/models.yaml", LogLevel: slog.LevelInfo, Workers: 3}, false},
+		{"negative worker count", []string{"--workers=-1"}, nil, Config{}, true},
 		{"bad role", []string{"--role=boss"}, nil, Config{}, true},
 		{"bad level", []string{"--log-level=loud"}, nil, Config{}, true},
 		{"unknown flag", []string{"--nope"}, nil, Config{}, true},

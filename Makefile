@@ -6,7 +6,7 @@ GO ?= go
 STATICCHECK ?= staticcheck
 SQLC ?= sqlc
 
-.PHONY: demo-data demo-data-clear up down migrate seed serve test test-unit test-integration lint sqlc web-install web-dev web-check web-build
+.PHONY: chaos demo-data demo-data-clear up down migrate seed serve test test-unit test-integration lint sqlc web-install web-dev web-check web-build
 
 up: ## start Postgres and Redis and wait until healthy
 	docker compose up -d --wait
@@ -37,6 +37,11 @@ test-unit:
 # Integration tests write real rows, so they get their own database and never touch the one the dashboard uses.
 TEST_DB ?= spillway_test
 TEST_DATABASE_URL ?= postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:$(POSTGRES_PORT)/$(TEST_DB)?sslmode=disable
+
+chaos: ## the chaos test, reduced (CHAOS_RUNS=10); needs `make up`. CI runs the full 50
+	@docker compose exec -T postgres psql -U $(POSTGRES_USER) -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$(TEST_DB)'" | grep -q 1 \
+		|| docker compose exec -T postgres createdb -U $(POSTGRES_USER) $(TEST_DB)
+	CHAOS_RUNS=$${CHAOS_RUNS:-10} DATABASE_URL="$(TEST_DATABASE_URL)" $(GO) test -race -tags=integration -count=1 -run Chaos -v ./cmd/spillway
 
 test-integration: ## needs `make up`
 	@docker compose exec -T postgres psql -U $(POSTGRES_USER) -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$(TEST_DB)'" | grep -q 1 \

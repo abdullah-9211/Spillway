@@ -107,18 +107,32 @@ type runsRig struct {
 	srv   *httptest.Server
 	store *fakeRunStore
 	a, b  uuid.UUID
+	opts  RunsOptions
+	t     *testing.T
 }
 
 func newRunsRig(t *testing.T) *runsRig {
 	t.Helper()
-	st := newFakeRunStore()
-	a, b := uuid.New(), uuid.New()
+	r := &runsRig{store: newFakeRunStore(), a: uuid.New(), b: uuid.New(), t: t}
+	r.opts = RunsOptions{Store: r.store, Caps: runs.Caps{MaxSteps: 50, MaxCost: 1_000_000, Deadline: 15 * time.Minute},
+		Known: func(m string) bool { return m == "default" || m == "mini" }, Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }}
+	r.start()
+	return r
+}
+
+func (r *runsRig) start() {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := httptest.NewServer(NewHandler(Options{Auth: multiAuth{"key-a": a, "key-b": b}, Log: log, Runs: &RunsOptions{
-		Store: st, Caps: runs.Caps{MaxSteps: 50, MaxCost: 1_000_000, Deadline: 15 * time.Minute},
-		Known: func(m string) bool { return m == "default" || m == "mini" }, Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }}}))
-	t.Cleanup(srv.Close)
-	return &runsRig{srv: srv, store: st, a: a, b: b}
+	opts := r.opts
+	srv := httptest.NewServer(NewHandler(Options{Auth: multiAuth{"key-a": r.a, "key-b": r.b}, Log: log, Runs: &opts}))
+	r.t.Cleanup(srv.Close)
+	r.srv = srv
+}
+
+// srvOptions restarts the server with a live-events source.
+func (r *runsRig) srvOptions(ev Events) {
+	r.srv.Close()
+	r.opts.Events = ev
+	r.start()
 }
 
 func (r *runsRig) do(t *testing.T, method, path, token, body string, hdr ...string) (int, map[string]any, http.Header) {
@@ -308,5 +322,31 @@ func TestCancelRun(t *testing.T) {
 	r.store.runs[id2].Status = runs.Running
 	if code, body, _ = r.do(t, "POST", "/v1/runs/"+id2.String()+"/cancel", "key-a", ""); code != 202 || body["status"] != "running" || body["cancel_requested"] != true {
 		t.Errorf("cancel running: %d %v", code, body)
+	}
+}
+
+func TestRunsWithToolsMustNameRegisteredTools(t *testing.T) {
+	r := newRunsRig(t)
+	r.srv.Close()
+	r.opts.ToolsReady = true
+	r.opts.MissingTools = func(_ context.Context, names []string) ([]string, error) {
+		var m []string
+		for _, n := range names {
+			if n != "send_email" {
+				m = append(m, n)
+			}
+		}
+		return m, nil
+	}
+	r.start()
+	if code, body, _ := r.do(t, "POST", "/v1/runs", "key-a", `{"input":"x","tools":["send_email"]}`); code != 202 {
+		t.Errorf("a registered tool: %d %v", code, body)
+	}
+	code, body, _ := r.do(t, "POST", "/v1/runs", "key-a", `{"input":"x","tools":["send_email","nope"]}`)
+	if code != 400 || body["error"].(map[string]any)["param"] != "tools" || !strings.Contains(body["error"].(map[string]any)["message"].(string), `"nope"`) {
+		t.Errorf("an unknown tool: %d %v", code, body)
+	}
+	if len(r.store.runs) != 1 {
+		t.Errorf("a refused request must not create a run: %d runs", len(r.store.runs))
 	}
 }
