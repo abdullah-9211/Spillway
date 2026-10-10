@@ -32,8 +32,10 @@ import (
 
 const (
 	chaosSecret    = "chaos-webhook-secret"
-	toolCallsInRun = 4 // model, tool, model, tool, model, tool, model, tool, model: nine steps
-	stepsInRun     = 2*toolCallsInRun + 1
+	toolCallsInRun = 4 // the side-effecting calls
+	// Each run also sleeps once and asks for a person's approval once: model, sleep, model, wait_human, then the four
+	// model/tool pairs and a closing model call.
+	stepsInRun = 2*(toolCallsInRun+2) + 1
 )
 
 // effects is the tool receiver the chaos test needs: it records every delivery in a ledger, and applies the side effect
@@ -89,9 +91,12 @@ func (e *effects) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, `{"applied":%t}`, !seen)
 }
 
-// TestChaosKillingWorkersLosesNothingAndDuplicatesNothing: runs of nine steps with a side-effecting tool, a worker
+// TestChaosKillingWorkersLosesNothingAndDuplicatesNothing: runs of thirteen steps with a side-effecting tool, a worker
 // process that is SIGKILLed at random and restarted, and the claim that every run still succeeds with each effect
 // applied exactly once. The receiver deduplicates by the idempotency key, so redeliveries are expected and counted.
+//
+// Every run also sleeps for a second and waits for an approval, which a goroutine here gives through the public API, so
+// the killed workers are also parked-run and wake-up paths, not only tool calls.
 //
 // The full test (50 runs, up to 3 minutes) is for CI. Locally set CHAOS_RUNS=10: it then has 60 seconds, and is skipped
 // and reported if it cannot finish in that time.
@@ -124,9 +129,17 @@ func TestChaosKillingWorkersLosesNothingAndDuplicatesNothing(t *testing.T) {
 				asked++
 			}
 		}
-		if asked < toolCallsInRun {
+		call := func(name, args string) fake.Behavior {
 			return fake.Behavior{Delay: 80 * time.Millisecond, ToolCalls: []provider.ToolCall{{ID: fmt.Sprintf("call_%d", asked), Type: "function",
-				Function: provider.FunctionCall{Name: "effect", Arguments: fmt.Sprintf(`{"i":%d}`, asked)}}}}
+				Function: provider.FunctionCall{Name: name, Arguments: args}}}}
+		}
+		switch {
+		case asked == 0:
+			return call("sleep", `{"seconds":1}`)
+		case asked == 1:
+			return call("request_human_approval", `{"reason":"go on?"}`)
+		case asked < toolCallsInRun+2:
+			return call("effect", fmt.Sprintf(`{"i":%d}`, asked-2))
 		}
 		return fake.Behavior{Delay: 80 * time.Millisecond, Text: "all effects applied"}
 	}
@@ -181,6 +194,39 @@ runs: { lease_ttl: 3s, heartbeat: 1s, workers: 8, max_steps: 50, max_cost_usd: 1
 		}
 	}
 
+	// A person who approves every run that asks, through the public API.
+	approver := make(chan struct{})
+	var approverDone sync.WaitGroup
+	approverDone.Add(1)
+	go func() {
+		defer approverDone.Done()
+		for {
+			select {
+			case <-approver:
+				return
+			case <-time.After(250 * time.Millisecond):
+			}
+			rows, err := pool.Query(context.Background(), `SELECT id::text FROM runs WHERE status='waiting_human'`)
+			if err != nil {
+				continue
+			}
+			var ids []string
+			for rows.Next() {
+				var id string
+				_ = rows.Scan(&id)
+				ids = append(ids, id)
+			}
+			rows.Close()
+			for _, id := range ids {
+				req, _ := http.NewRequest("POST", api+"/v1/runs/"+id+"/approve", strings.NewReader(`{"note":"chaos approver"}`))
+				req.Header.Set("Authorization", "Bearer "+key)
+				if resp, err := http.DefaultClient.Do(req); err == nil {
+					resp.Body.Close()
+				}
+			}
+		}
+	}()
+
 	// The worker is killed at random, 1 to 4 seconds apart, and restarted at once.
 	var kills atomic.Int32
 	stop := make(chan struct{})
@@ -219,7 +265,9 @@ runs: { lease_ttl: 3s, heartbeat: 1s, workers: 8, max_steps: 50, max_cost_usd: 1
 		time.Sleep(500 * time.Millisecond)
 	}
 	close(stop)
+	close(approver)
 	killer.Wait()
+	approverDone.Wait()
 	if p := cur.Load(); p != nil {
 		_ = p.cmd.Process.Kill()
 		_, _ = p.cmd.Process.Wait()
@@ -249,13 +297,21 @@ runs: { lease_ttl: 3s, heartbeat: 1s, workers: 8, max_steps: 50, max_cost_usd: 1
 	if n := q(`SELECT count(*) FROM (SELECT run_id, step_no FROM run_steps WHERE step_no IS NOT NULL GROUP BY 1,2 HAVING count(*) FILTER (WHERE phase IN ('finished','failed')) <> 1) x`); n != 0 {
 		t.Errorf("%d steps do not have exactly one terminal row", n)
 	}
-	// Step numbers are contiguous, and each run has the nine steps.
+	// Every sleep was woken and every approval decided, once each.
+	if a, b := q(`SELECT count(*) FROM run_steps WHERE type='sleep' AND phase='started'`), q(`SELECT count(*) FROM run_steps WHERE type='sleep' AND phase='finished'`); a != runsN || b != runsN {
+		t.Errorf("sleeps started %d finished %d, want %d each", a, b, runsN)
+	}
+	if a, b := q(`SELECT count(*) FROM run_steps WHERE type='wait_human' AND phase='started'`), q(`SELECT count(*) FROM run_steps WHERE type='wait_human' AND phase='finished'`); a != runsN || b != runsN {
+		t.Errorf("approvals asked %d decided %d, want %d each", a, b, runsN)
+	}
+	// Step numbers are contiguous, and each run has all its steps.
 	if n := q(`SELECT count(*) FROM (SELECT run_id, count(DISTINCT step_no) c, max(step_no) m FROM run_steps WHERE step_no IS NOT NULL GROUP BY 1) x WHERE c <> m OR c <> $1`, stepsInRun); n != 0 {
 		t.Errorf("%d runs have missing, extra or non-contiguous steps", n)
 	}
-	// A step finished by a different worker epoch than the one that started it was re-issued, and says so.
+	// A model or tool step finished by a different worker epoch than the one that started it was re-issued, and says so.
+	// (A sleep is woken, and an approval decided, in a later epoch by design; those are checked above.)
 	if n := q(`SELECT count(*) FROM run_steps t JOIN run_steps s ON s.run_id=t.run_id AND s.step_no=t.step_no AND s.phase='started'
-		WHERE t.phase IN ('finished','failed') AND t.lease_epoch <> s.lease_epoch
+		WHERE t.phase IN ('finished','failed') AND t.lease_epoch <> s.lease_epoch AND t.type IN ('model_call','tool_call')
 		AND NOT EXISTS (SELECT 1 FROM run_steps r WHERE r.run_id=t.run_id AND r.step_no=t.step_no AND r.phase='reissued' AND r.lease_epoch=t.lease_epoch)`); n != 0 {
 		t.Errorf("%d interrupted steps have no reissued row", n)
 	}

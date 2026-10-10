@@ -12,6 +12,9 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/abdullah-9211/spillway/internal/provider"
 	"github.com/abdullah-9211/spillway/internal/runs"
@@ -35,6 +38,7 @@ type Executor struct {
 	Client        *http.Client
 	WebhookSecret string // signs every call that has no secret of its own; empty means unsigned
 	MaxResponse   int    // default MaxResponseBytes
+	MCP           *MCPClient
 }
 
 var _ runs.ToolRunner = (*Executor)(nil)
@@ -65,9 +69,41 @@ func (e *Executor) Specs(names []string) ([]provider.Tool, error) {
 		if len(schema) == 0 {
 			schema = json.RawMessage(`{"type":"object","properties":{}}`)
 		}
-		out = append(out, provider.Tool{Type: "function", Function: provider.ToolFunction{Name: t.Name, Description: t.Description, Parameters: schema}})
+		out = append(out, provider.Tool{Type: "function", Function: provider.ToolFunction{Name: runs.ModelName(t.Name), Description: t.Description, Parameters: schema}})
 	}
 	return out, nil
+}
+
+// RequiresApproval says whether calls to the named tool wait for a person. An MCP tool takes the setting of its server.
+func (e *Executor) RequiresApproval(ctx context.Context, name string) (bool, error) {
+	ts, err := e.Source.Get(ctx, []string{name})
+	if err != nil {
+		return false, err
+	}
+	return ts[0].RequiresApproval, nil
+}
+
+var _ runs.ApprovalPolicy = (*Executor)(nil)
+
+// Discover fetches an MCP server's tool list.
+func (e *Executor) Discover(ctx context.Context, t Tool) ([]MCPToolInfo, error) {
+	if t.Kind != MCP {
+		return nil, fmt.Errorf("tool %q is not an MCP server", t.Name)
+	}
+	timeout := t.Timeout
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return e.mcp().ListTools(cctx, t.Endpoint, t.Headers)
+}
+
+func (e *Executor) mcp() *MCPClient {
+	if e.MCP == nil {
+		e.MCP = &MCPClient{HTTP: e.Client}
+	}
+	return e.MCP
 }
 
 // Sign is the value of X-Spillway-Signature for a body: "sha256=" and the hex HMAC-SHA256 of the body.
@@ -98,8 +134,8 @@ func (e *Executor) Call(ctx context.Context, inv runs.ToolInvocation) (string, e
 		return "", err
 	}
 	t := ts[0]
-	if t.Kind != HTTP {
-		return "", fmt.Errorf("tool %q is of kind %s, which this worker cannot call yet", t.Name, t.Kind)
+	if t.Kind == MCP {
+		return e.callMCP(ctx, t, inv)
 	}
 	args := inv.Arguments
 	if len(args) == 0 {
@@ -169,4 +205,54 @@ func snippet(s string) string {
 		s = s[:300] + "..."
 	}
 	return s
+}
+
+func (e *Executor) callMCP(ctx context.Context, t Tool, inv runs.ToolInvocation) (string, error) {
+	timeout := t.Timeout
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	extra := map[string]string{"Idempotency-Key": inv.IdempotencyKey}
+	signing := e.WebhookSecret
+	for k, v := range t.Headers {
+		if strings.EqualFold(k, SigningSecretHeader) {
+			signing = v
+		}
+	}
+	if signing != "" {
+		extra["X-Spillway-Signature"] = Sign(signing, []byte(inv.IdempotencyKey))
+	}
+	text, err := e.mcp().CallTool(cctx, t.Endpoint, t.Headers, t.MCPTool, inv.Arguments, inv.IdempotencyKey, extra)
+	if err != nil {
+		if errors.Is(cctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+			return "", fmt.Errorf("tool %q timed out after %s", t.Name, timeout)
+		}
+		return "", fmt.Errorf("tool %q: %w", t.Name, err)
+	}
+	if limit := e.maxResponse(); len(text) > limit {
+		text = text[:limit] + fmt.Sprintf("\n[truncated: the answer was longer than %d bytes]", limit)
+	}
+	return text, nil
+}
+
+// DiscoverAndStore fetches a server's tools and stores the list on its registry row. A server that cannot be read is a
+// *DiscoverError and the stored list is left as it was.
+func DiscoverAndStore(ctx context.Context, st *Store, e *Executor, id uuid.UUID, now time.Time) (Tool, error) {
+	t, err := st.ByID(ctx, id)
+	if err != nil {
+		return Tool{}, err
+	}
+	if t.Kind != MCP {
+		return Tool{}, fmt.Errorf("%w: %q is not an MCP server", ErrInvalid, t.Name)
+	}
+	list, err := e.Discover(ctx, t)
+	if err != nil {
+		return Tool{}, &DiscoverError{Err: err}
+	}
+	if err := st.SetDiscovered(ctx, id, list, now); err != nil {
+		return Tool{}, err
+	}
+	return st.ByID(ctx, id)
 }

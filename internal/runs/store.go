@@ -310,7 +310,8 @@ func (g *pgLog) Append(ctx context.Context, ns NewStep) (Step, error) {
 	// The projection, from the row just written.
 	var inc int
 	var status, reason *string
-	finish := false
+	var wake *time.Time
+	finish, clearWake := false, false
 	switch {
 	case ns.Type == RunStatus && ns.Phase == PhaseFinished:
 		p := ns.Payload.(StatusPayload)
@@ -329,14 +330,30 @@ func (g *pgLog) Append(ctx context.Context, ns NewStep) (Step, error) {
 	case ns.Type == ToolCall && ns.Phase.Terminal():
 		s := string(Running)
 		status = &s
+	case ns.Type == Sleep && ns.Phase == PhaseStarted:
+		s := string(Sleeping)
+		status = &s
+		inc = 1
+		if p, ok := ns.Payload.(SleepStarted); ok && !p.WakeAt.IsZero() {
+			wake = &p.WakeAt
+		}
+	case ns.Type == WaitHuman && ns.Phase == PhaseStarted:
+		s := string(WaitingHuman)
+		status = &s
+		inc = 1
+	case (ns.Type == Sleep || ns.Type == WaitHuman) && ns.Phase.Terminal():
+		s := string(Running)
+		status = &s
+		clearWake = true
 	case ns.Phase == PhaseStarted:
 		inc = 1
 	}
 	tag, err := tx.Exec(ctx, `UPDATE runs SET step_count = step_count + $3, cost_usd = cost_usd + $4,
 		status = COALESCE($5, status), failure_reason = COALESCE($6, failure_reason),
-		finished_at = CASE WHEN $7 THEN $8 ELSE finished_at END
+		finished_at = CASE WHEN $7 THEN $8 ELSE finished_at END,
+		wake_at = CASE WHEN $10 THEN NULL ELSE COALESCE($11, wake_at) END
 		WHERE id=$1 AND lease_owner=$2 AND lease_epoch=$9`,
-		g.l.RunID, g.l.Owner, inc, db.NumericFromMicros(ns.Cost), status, reason, finish, now, g.l.Epoch)
+		g.l.RunID, g.l.Owner, inc, db.NumericFromMicros(ns.Cost), status, reason, finish, now, g.l.Epoch, clearWake, wake)
 	if err != nil {
 		return Step{}, err
 	}
@@ -398,6 +415,79 @@ func (s *Store) requestCancel(ctx context.Context, id uuid.UUID, key *uuid.UUID,
 			return Run{}, err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE runs SET status='cancelled', failure_reason='cancelled', finished_at=$2, lease_expires_at=NULL WHERE id=$1`, id, now); err != nil {
+			return Run{}, err
+		}
+		if _, err := tx.Exec(ctx, `SELECT pg_notify('run_steps', $1)`, fmt.Sprintf("%s:%d", id, rowID)); err != nil {
+			return Run{}, err
+		}
+	}
+	r, err := scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM runs r WHERE r.id=$1`, id))
+	if err != nil {
+		return Run{}, err
+	}
+	return r, tx.Commit(ctx)
+}
+
+// Decide records a person's decision on a run that waits for one. The run must be waiting_human. Approving leaves it
+// claimable (running, no lease), so any worker resumes it, including one that starts after the original worker died:
+// the decision is a row in the log, not a message to a process. Rejecting ends the run as failed with reason "rejected".
+// key limits the decision to runs of that API key; nil means an admin of the dashboard, who may decide any run.
+func (s *Store) Decide(ctx context.Context, id uuid.UUID, key *uuid.UUID, d Decision, now time.Time) (Run, error) {
+	if d.Decision != "approve" && d.Decision != "reject" {
+		return Run{}, fmt.Errorf("runs: decision must be approve or reject")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Run{}, err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // rolled back unless committed
+
+	var status string
+	var epoch int64
+	var keyID uuid.UUID
+	err = tx.QueryRow(ctx, `SELECT status, lease_epoch, api_key_id FROM runs WHERE id=$1 FOR UPDATE`, id).Scan(&status, &epoch, &keyID)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && key != nil && keyID != *key) {
+		return Run{}, ErrNotFound
+	}
+	if err != nil {
+		return Run{}, err
+	}
+	if Status(status).Terminal() {
+		return Run{}, ErrFinished
+	}
+	if Status(status) != WaitingHuman {
+		return Run{}, ErrNotWaiting
+	}
+	var stepNo int
+	if err := tx.QueryRow(ctx, `SELECT step_no FROM run_steps WHERE run_id=$1 AND type='wait_human' AND phase='started' ORDER BY id DESC LIMIT 1`, id).Scan(&stepNo); err != nil {
+		return Run{}, fmt.Errorf("runs: waiting run %s has no wait_human step: %w", id, err)
+	}
+	payload, _ := json.Marshal(d)
+	var rowID int64
+	err = tx.QueryRow(ctx, `INSERT INTO run_steps (run_id, step_no, type, phase, payload, lease_epoch, worker_id, created_at)
+		VALUES ($1,$2,'wait_human','finished',$3,$4,'api',$5) RETURNING id`, id, stepNo, payload, epoch, now).Scan(&rowID)
+	var pe *pgconn.PgError
+	if errors.As(err, &pe) && pe.Code == "23505" {
+		return Run{}, ErrNotWaiting // decided a moment ago
+	}
+	if err != nil {
+		return Run{}, err
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_notify('run_steps', $1)`, fmt.Sprintf("%s:%d", id, rowID)); err != nil {
+		return Run{}, err
+	}
+	if d.Decision == "approve" {
+		// Claimable at once: no lease, status running.
+		if _, err := tx.Exec(ctx, `UPDATE runs SET status='running', lease_owner=NULL, lease_expires_at=NULL WHERE id=$1`, id); err != nil {
+			return Run{}, err
+		}
+	} else {
+		body, _ := json.Marshal(StatusPayload{Status: Failed, Reason: ReasonRejected, Detail: d.Note})
+		if err := tx.QueryRow(ctx, `INSERT INTO run_steps (run_id, type, phase, payload, lease_epoch, worker_id, created_at)
+			VALUES ($1,'run_status','finished',$2,$3,'api',$4) RETURNING id`, id, body, epoch, now).Scan(&rowID); err != nil {
+			return Run{}, err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE runs SET status='failed', failure_reason=$2, finished_at=$3, lease_expires_at=NULL, wake_at=NULL WHERE id=$1`, id, ReasonRejected, now); err != nil {
 			return Run{}, err
 		}
 		if _, err := tx.Exec(ctx, `SELECT pg_notify('run_steps', $1)`, fmt.Sprintf("%s:%d", id, rowID)); err != nil {

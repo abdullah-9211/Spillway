@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -117,6 +118,11 @@ func (r Request) Validate(o ValidateOptions) error {
 	for _, t := range append(append([]string(nil), r.Tools...), r.ApprovalRequired...) {
 		if strings.TrimSpace(t) == "" {
 			return bad("tools", "a tool name is empty")
+		}
+	}
+	for _, a := range r.ApprovalRequired {
+		if !slices.Contains(r.Tools, a) {
+			return bad("approval_required", "%q must also be listed in tools", a)
 		}
 	}
 	if l := r.Limits; l != nil {

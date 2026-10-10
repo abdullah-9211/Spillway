@@ -242,6 +242,7 @@ type fakeStarter struct {
 	raw     []byte
 	err     error
 	cancel  error
+	decided []runs.Decision
 }
 
 func (f *fakeStarter) Create(_ context.Context, req runs.Request, raw []byte) (runs.Run, error) {
@@ -250,6 +251,14 @@ func (f *fakeStarter) Create(_ context.Context, req runs.Request, raw []byte) (r
 	}
 	f.created, f.raw = append(f.created, req), raw
 	return runs.Run{ID: uuid.MustParse("00000000-0000-7000-8000-0000000000aa"), Status: runs.Queued}, nil
+}
+
+func (f *fakeStarter) Decide(_ context.Context, id uuid.UUID, d runs.Decision, _ time.Time) (runs.Run, error) {
+	f.decided = append(f.decided, d)
+	if f.cancel != nil {
+		return runs.Run{}, f.cancel
+	}
+	return runs.Run{ID: id, Status: runs.Running}, nil
 }
 
 func (f *fakeStarter) CancelAny(_ context.Context, id uuid.UUID, _ time.Time) (runs.Run, error) {
@@ -374,5 +383,37 @@ func TestAdminRunEventsStream(t *testing.T) {
 	}
 	if resp := r.do(t, "GET", "/admin/runs/"+id.String()+"/events", "", ""); resp.StatusCode != 401 {
 		t.Errorf("no token: %d", resp.StatusCode)
+	}
+}
+
+func TestAdminApproveRejectAreAdminOnlyAndRecordWho(t *testing.T) {
+	r, _ := newRunsAdminRig(t)
+	fs := r.admin.d.RunStarter.(*fakeStarter)
+	admin, viewer := r.token(t, "admin", "admin-password"), r.token(t, "viewer", "viewer-password")
+	id := uuid.NewString()
+	if code, _ := r.json(t, "POST", "/admin/runs/"+id+"/approve", viewer, `{}`); code != 403 {
+		t.Errorf("viewer approve: %d", code)
+	}
+	if code, _ := r.json(t, "POST", "/admin/runs/"+id+"/reject", viewer, `{}`); code != 403 {
+		t.Errorf("viewer reject: %d", code)
+	}
+	if len(fs.decided) != 0 {
+		t.Fatal("a viewer's decision reached the store")
+	}
+	if code, body := r.json(t, "POST", "/admin/runs/"+id+"/approve", admin, `{"note":"  ok to send  "}`); code != 202 || body["status"] != "running" {
+		t.Fatalf("approve: %d %v", code, body)
+	}
+	if d := fs.decided[0]; d.Decision != "approve" || d.By != "admin" || d.Note != "ok to send" {
+		t.Errorf("decision = %+v", d)
+	}
+	if code, _ := r.json(t, "POST", "/admin/runs/"+id+"/reject", admin, ``); code != 202 || fs.decided[1].Decision != "reject" {
+		t.Errorf("reject without a body: %d", code)
+	}
+	if code, _ := r.json(t, "POST", "/admin/runs/"+id+"/reject", admin, `{"note":"`+strings.Repeat("x", runs.MaxNoteBytes+1)+`"}`); code != 400 {
+		t.Errorf("long note: %d", code)
+	}
+	fs.cancel = runs.ErrNotWaiting
+	if code, body := r.json(t, "POST", "/admin/runs/"+id+"/approve", admin, `{}`); code != 409 || body["error"].(map[string]any)["code"] != "run_not_waiting" {
+		t.Errorf("not waiting: %d %v", code, body)
 	}
 }

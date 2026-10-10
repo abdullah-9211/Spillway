@@ -341,9 +341,9 @@ func TestProductionRoutesAreAllDeclared(t *testing.T) {
 	}
 	sort.Strings(got)
 	want := []string{
-		"DELETE /admin/keys/{id} admin", "GET /admin/keys viewer", "GET /admin/me viewer", "GET /admin/models viewer", "GET /admin/playground viewer", "GET /admin/playground/history viewer", "GET /admin/runs viewer", "GET /admin/runs/activity viewer", "GET /admin/runs/summary viewer", "GET /admin/runs/{id} viewer", "GET /admin/runs/{id}/events viewer", "GET /admin/runs/{id}/graph viewer", "GET /admin/status viewer",
+		"DELETE /admin/keys/{id} admin", "DELETE /admin/tools/{id} admin", "GET /admin/keys viewer", "GET /admin/me viewer", "GET /admin/models viewer", "GET /admin/playground viewer", "GET /admin/playground/history viewer", "GET /admin/runs viewer", "GET /admin/runs/activity viewer", "GET /admin/runs/summary viewer", "GET /admin/runs/{id} viewer", "GET /admin/runs/{id}/events viewer", "GET /admin/runs/{id}/graph viewer", "GET /admin/status viewer", "GET /admin/tools viewer",
 		"GET /admin/usage/export.csv viewer", "GET /admin/usage/requests viewer", "GET /admin/usage/summary viewer",
-		"PATCH /admin/keys/{id} admin", "POST /admin/keys admin", "POST /admin/login public", "POST /admin/playground/chat admin", "POST /admin/runs admin", "POST /admin/runs/{id}/cancel admin",
+		"PATCH /admin/keys/{id} admin", "POST /admin/keys admin", "POST /admin/login public", "POST /admin/playground/chat admin", "POST /admin/runs admin", "POST /admin/runs/{id}/approve admin", "POST /admin/runs/{id}/cancel admin", "POST /admin/runs/{id}/reject admin", "POST /admin/tools admin", "POST /admin/tools/{id}/discover admin", "PUT /admin/tools/{id} admin",
 	}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Errorf("routes = %v, want %v", got, want)

@@ -82,6 +82,8 @@ func newPlaygroundRig(t *testing.T) (*adminRig, *fakePlayground) {
 	r.admin.d.Events = &fakeEvents{}
 	r.admin.d.Now = func() time.Time { return runsNow }
 	r.admin.registerRuns()
+	r.admin.d.Tools = newFakeTools()
+	r.admin.registerTools()
 	return r, fp
 }
 

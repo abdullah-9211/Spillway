@@ -210,3 +210,42 @@ func TestGraphIgnoresStatusRowsAndTruncatesBigPayloads(t *testing.T) {
 		t.Errorf("empty lists are [] in JSON, not null: %s", b)
 	}
 }
+
+func TestGraphShowsAWaitingApprovalAndDoesNotCallItARecovery(t *testing.T) {
+	wait := row(0, 2, WaitHuman, PhaseStarted, 1, "w-1", WaitStarted{Reason: "Approval needed to call send_email", Tool: "send_email", Arguments: json.RawMessage(`{"to":"a@b.c"}`), ToolCallID: "c1"}, 0)
+	steps := seq(modelStart(1, 1, "w-1"), modelDone(1, 1, "w-1", "u1", 1000), wait)
+	g := BuildGraph(GraphRun{Status: WaitingHuman}, steps, nil, gBase.Add(time.Hour))
+	eq(t, "waiting", brief(g), "1/model_call/w-1/e1/finished", "2/wait_human/w-1/e1/waiting")
+	a := g.Run.Approval
+	if a == nil || a.StepNo != 2 || a.Tool != "send_email" || !a.Gate || a.Arguments != `{"to":"a@b.c"}` || a.Reason == "" {
+		t.Fatalf("approval = %+v", a)
+	}
+
+	// Decided by the API at the same epoch, then another worker (epoch 2) goes on: one node, no recovery.
+	decided := row(0, 2, WaitHuman, PhaseFinished, 1, "api", Decision{Decision: "approve", By: "ana", Note: "ok"}, 0)
+	next := row(0, 3, ToolCall, PhaseStarted, 2, "w-2", ToolStarted{Tool: "send_email", Arguments: json.RawMessage(`{}`)}, 0)
+	g = BuildGraph(GraphRun{Status: Running}, seq(append(steps, decided, next)...), nil, gBase.Add(time.Hour))
+	eq(t, "decided", brief(g), "1/model_call/w-1/e1/finished", "2/wait_human/w-1/e1/finished", "3/tool_call/w-2/e2/running")
+	eq(t, "no recovery", rec(g))
+	if n := g.Nodes[1]; n.Decision != "approve" || n.By != "ana" || n.Note != "ok" || !n.Gate {
+		t.Errorf("node = %+v", n)
+	}
+	if g.Run.Approval != nil {
+		t.Error("nothing is pending any more")
+	}
+}
+
+func TestGraphSleepWokenByAnotherWorkerIsOneNode(t *testing.T) {
+	wake := gBase.Add(10 * time.Minute)
+	started := row(0, 2, Sleep, PhaseStarted, 1, "w-1", SleepStarted{Seconds: 600, WakeAt: wake, ToolCallID: "c1"}, 0)
+	steps := seq(modelStart(1, 1, "w-1"), modelDone(1, 1, "w-1", "u1", 1000), started)
+	g := BuildGraph(GraphRun{Status: Sleeping}, steps, nil, gBase.Add(time.Minute))
+	eq(t, "sleeping", brief(g), "1/model_call/w-1/e1/finished", "2/sleep/w-1/e1/sleeping")
+	if g.Run.WakeAt == nil || !g.Run.WakeAt.Equal(wake) || g.Nodes[1].Seconds != 600 {
+		t.Errorf("wake = %v node = %+v", g.Run.WakeAt, g.Nodes[1])
+	}
+	done := row(0, 2, Sleep, PhaseFinished, 2, "w-2", struct{}{}, 0)
+	g = BuildGraph(GraphRun{Status: Running}, seq(append(steps, done)...), nil, gBase.Add(time.Hour))
+	eq(t, "woken", brief(g), "1/model_call/w-1/e1/finished", "2/sleep/w-1/e1/finished")
+	eq(t, "no recovery", rec(g))
+}

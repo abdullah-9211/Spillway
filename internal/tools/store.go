@@ -31,7 +31,15 @@ const DefaultTimeout = 10 * time.Second
 var (
 	ErrNotFound  = errors.New("tools: no such tool")
 	ErrDuplicate = errors.New("tools: a tool with that name already exists")
+	// ErrInvalid wraps a problem with what the caller sent.
+	ErrInvalid = errors.New("tools: invalid")
 )
+
+// DiscoverError: the MCP server could not be reached or answered badly.
+type DiscoverError struct{ Err error }
+
+func (e *DiscoverError) Error() string { return "Could not read the server's tools: " + e.Err.Error() }
+func (e *DiscoverError) Unwrap() error { return e.Err }
 
 type Tool struct {
 	ID               uuid.UUID
@@ -44,6 +52,10 @@ type Tool struct {
 	Timeout          time.Duration
 	RequiresApproval bool
 	CreatedAt        time.Time
+	// MCPTool is set on a tool resolved from an MCP server: the server's own name for it. Name is "server.tool".
+	MCPTool string
+	// Discovered is when an MCP server's tool list was last fetched; zero for http tools and undiscovered servers.
+	Discovered time.Time
 }
 
 type CreateParams struct {
@@ -66,6 +78,9 @@ func NewStore(pool *pgxpool.Pool, box *secret.Box) *Store { return &Store{pool: 
 
 // ValidateName: the name is shown to the model, so it must be a plain identifier.
 func ValidateName(n string) error {
+	if n == "sleep" || n == "request_human_approval" {
+		return fmt.Errorf("%q is a built-in tool of every run and cannot be registered", n)
+	}
 	if n == "" || len(n) > 64 {
 		return errors.New("a tool name is 1 to 64 characters")
 	}
@@ -79,20 +94,26 @@ func ValidateName(n string) error {
 }
 
 func (p CreateParams) validate() error {
+	invalid := func(format string, a ...any) error {
+		return fmt.Errorf("%w: "+format, append([]any{ErrInvalid}, a...)...)
+	}
 	if err := ValidateName(p.Name); err != nil {
-		return err
+		return invalid("%v", err)
 	}
 	if p.Kind != HTTP && p.Kind != MCP {
-		return fmt.Errorf("kind must be http or mcp, not %q", p.Kind)
+		return invalid("kind must be http or mcp, not %q", p.Kind)
+	}
+	if p.Kind == MCP && strings.Contains(p.Name, ".") {
+		return invalid("an MCP server name may not contain '.', which separates the server from its tool")
 	}
 	if !strings.HasPrefix(p.Endpoint, "http://") && !strings.HasPrefix(p.Endpoint, "https://") {
-		return errors.New("endpoint must be an http:// or https:// URL")
+		return invalid("endpoint must be an http:// or https:// URL")
 	}
 	if len(p.InputSchema) > 0 && !json.Valid(p.InputSchema) {
-		return errors.New("input_schema is not valid JSON")
+		return invalid("input_schema is not valid JSON")
 	}
 	if p.Timeout < 0 {
-		return errors.New("timeout must not be negative")
+		return invalid("timeout must not be negative")
 	}
 	return nil
 }
@@ -158,6 +179,12 @@ func (s *Store) scan(row pgx.Row) (Tool, error) {
 		return Tool{}, err
 	}
 	t.Kind, t.InputSchema, t.Timeout = Kind(kind), schema, time.Duration(ms)*time.Millisecond
+	if t.Kind == MCP {
+		var doc discoveredDoc
+		if json.Unmarshal(schema, &doc) == nil {
+			t.Discovered = doc.At
+		}
+	}
 	if len(enc) > 0 {
 		if s.box == nil {
 			return Tool{}, fmt.Errorf("tool %q has auth headers but SPILLWAY_SECRET_KEY is not set", t.Name)
@@ -173,14 +200,12 @@ func (s *Store) scan(row pgx.Row) (Tool, error) {
 	return t, nil
 }
 
-// Get returns the named tools, in the order asked. A name that is not registered is ErrNotFound.
+// Get returns the named tools, in the order asked. A name that is not registered is ErrNotFound. "server.tool" resolves
+// to a tool of a registered MCP server, using the list its last discovery stored.
 func (s *Store) Get(ctx context.Context, names []string) ([]Tool, error) {
 	out := make([]Tool, 0, len(names))
 	for _, n := range names {
-		t, err := s.scan(s.pool.QueryRow(ctx, `SELECT `+toolColumns+` FROM tools WHERE name=$1`, n))
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("%w: %q", ErrNotFound, n)
-		}
+		t, err := s.one(ctx, n)
 		if err != nil {
 			return nil, err
 		}
@@ -189,29 +214,175 @@ func (s *Store) Get(ctx context.Context, names []string) ([]Tool, error) {
 	return out, nil
 }
 
-// Missing returns which of the names are not registered.
-func (s *Store) Missing(ctx context.Context, names []string) ([]string, error) {
-	if len(names) == 0 {
-		return nil, nil
+func (s *Store) one(ctx context.Context, name string) (Tool, error) {
+	t, err := s.scan(s.pool.QueryRow(ctx, `SELECT `+toolColumns+` FROM tools WHERE name=$1`, name))
+	switch {
+	case err == nil:
+		if t.Kind == MCP {
+			return Tool{}, fmt.Errorf("%w: %q is an MCP server; name its tools as %s.<tool>", ErrNotFound, name, name)
+		}
+		return t, nil
+	case !errors.Is(err, pgx.ErrNoRows):
+		return Tool{}, err
 	}
-	rows, err := s.pool.Query(ctx, `SELECT name FROM tools WHERE name = ANY($1)`, names)
+	for i := len(name) - 1; i > 0; i-- {
+		if name[i] != '.' {
+			continue
+		}
+		srv, err := s.scan(s.pool.QueryRow(ctx, `SELECT `+toolColumns+` FROM tools WHERE name=$1 AND kind='mcp'`, name[:i]))
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return Tool{}, err
+		}
+		remote := name[i+1:]
+		list, err := DiscoveredTools(srv.InputSchema)
+		if err != nil {
+			return Tool{}, err
+		}
+		if len(list) == 0 {
+			return Tool{}, fmt.Errorf("%w: %q: server %q has not been discovered yet", ErrNotFound, name, srv.Name)
+		}
+		for _, d := range list {
+			if d.Name == remote {
+				srv.Name, srv.MCPTool, srv.Description, srv.InputSchema = name, remote, d.Description, d.InputSchema
+				return srv, nil
+			}
+		}
+		return Tool{}, fmt.Errorf("%w: %q: server %q has no tool %q", ErrNotFound, name, srv.Name, remote)
+	}
+	return Tool{}, fmt.Errorf("%w: %q", ErrNotFound, name)
+}
+
+// Missing returns which of the names are not registered (or, for an MCP tool, not discovered).
+func (s *Store) Missing(ctx context.Context, names []string) ([]string, error) {
+	var missing []string
+	for _, n := range names {
+		if _, err := s.one(ctx, n); errors.Is(err, ErrNotFound) {
+			missing = append(missing, n)
+		} else if err != nil {
+			return nil, err
+		}
+	}
+	return missing, nil
+}
+
+// List returns every registered tool and server, by name.
+func (s *Store) List(ctx context.Context) ([]Tool, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+toolColumns+` FROM tools ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	have := map[string]bool{}
+	var out []Tool
 	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err != nil {
+		t, err := s.scan(rows)
+		if err != nil {
 			return nil, err
 		}
-		have[n] = true
+		out = append(out, t)
 	}
-	var missing []string
-	for _, n := range names {
-		if !have[n] {
-			missing = append(missing, n)
+	return out, rows.Err()
+}
+
+// ByName returns one registered tool or MCP server exactly as stored.
+func (s *Store) ByName(ctx context.Context, name string) (Tool, error) {
+	t, err := s.scan(s.pool.QueryRow(ctx, `SELECT `+toolColumns+` FROM tools WHERE name=$1`, name))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Tool{}, fmt.Errorf("%w: %q", ErrNotFound, name)
+	}
+	return t, err
+}
+
+// ByID returns one registered tool or server exactly as stored.
+func (s *Store) ByID(ctx context.Context, id uuid.UUID) (Tool, error) {
+	t, err := s.scan(s.pool.QueryRow(ctx, `SELECT `+toolColumns+` FROM tools WHERE id=$1`, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Tool{}, ErrNotFound
+	}
+	return t, err
+}
+
+// UpdateParams: a nil field is left alone. Headers, when set, replace the stored ones.
+type UpdateParams struct {
+	Endpoint         *string
+	Description      *string
+	Headers          map[string]string
+	InputSchema      json.RawMessage
+	Timeout          *time.Duration
+	RequiresApproval *bool
+}
+
+func (s *Store) Update(ctx context.Context, id uuid.UUID, p UpdateParams) (Tool, error) {
+	cur, err := s.ByID(ctx, id)
+	if err != nil {
+		return Tool{}, err
+	}
+	if p.Endpoint != nil {
+		cur.Endpoint = *p.Endpoint
+	}
+	if p.Description != nil {
+		cur.Description = *p.Description
+	}
+	if p.Headers != nil {
+		cur.Headers = p.Headers
+	}
+	if len(p.InputSchema) > 0 && cur.Kind == HTTP {
+		cur.InputSchema = p.InputSchema
+	}
+	if p.Timeout != nil {
+		cur.Timeout = *p.Timeout
+	}
+	if p.RequiresApproval != nil {
+		cur.RequiresApproval = *p.RequiresApproval
+	}
+	check := CreateParams{Name: cur.Name, Kind: cur.Kind, Endpoint: cur.Endpoint, InputSchema: cur.InputSchema, Timeout: cur.Timeout}
+	if err := check.validate(); err != nil {
+		return Tool{}, err
+	}
+	var enc []byte
+	if len(cur.Headers) > 0 {
+		if s.box == nil {
+			return Tool{}, errors.New("SPILLWAY_SECRET_KEY is not set, so auth headers cannot be stored")
+		}
+		raw, _ := json.Marshal(cur.Headers)
+		if enc, err = s.box.Encrypt(raw, id[:]); err != nil {
+			return Tool{}, err
 		}
 	}
-	return missing, rows.Err()
+	var schema any
+	if len(cur.InputSchema) > 0 {
+		schema = []byte(cur.InputSchema)
+	}
+	_, err = s.pool.Exec(ctx, `UPDATE tools SET endpoint=$2, headers_enc=$3, description=$4, input_schema=$5, timeout_ms=$6, requires_approval=$7 WHERE id=$1`,
+		id, cur.Endpoint, enc, nullIfEmpty(cur.Description), schema, int(cur.Timeout/time.Millisecond), cur.RequiresApproval)
+	return cur, err
+}
+
+func (s *Store) Delete(ctx context.Context, id uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM tools WHERE id=$1`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetDiscovered stores the tool list fetched from an MCP server.
+func (s *Store) SetDiscovered(ctx context.Context, id uuid.UUID, list []MCPToolInfo, now time.Time) error {
+	raw, err := json.Marshal(discoveredDoc{Tools: list, At: now})
+	if err != nil {
+		return err
+	}
+	tag, err := s.pool.Exec(ctx, `UPDATE tools SET input_schema=$2 WHERE id=$1 AND kind='mcp'`, id, raw)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

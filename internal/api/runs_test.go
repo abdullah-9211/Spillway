@@ -20,12 +20,13 @@ import (
 
 // fakeRunStore keeps runs in memory, with the same visibility and idempotency rules as the real store.
 type fakeRunStore struct {
-	mu    sync.Mutex
-	runs  map[uuid.UUID]*runs.Run
-	steps map[uuid.UUID][]runs.Step
-	idem  map[string]uuid.UUID
-	raws  map[uuid.UUID]string
-	out   string
+	mu        sync.Mutex
+	runs      map[uuid.UUID]*runs.Run
+	steps     map[uuid.UUID][]runs.Step
+	idem      map[string]uuid.UUID
+	raws      map[uuid.UUID]string
+	out       string
+	decisions []runs.Decision
 }
 
 func newFakeRunStore() *fakeRunStore {
@@ -90,6 +91,28 @@ func (f *fakeRunStore) RequestCancel(_ context.Context, id, key uuid.UUID, _ tim
 		r.Status, r.FailureReason = runs.Cancelled, "cancelled"
 	} else {
 		r.CancelRequested = true
+	}
+	return *r, nil
+}
+
+func (f *fakeRunStore) Decide(_ context.Context, id uuid.UUID, key *uuid.UUID, d runs.Decision, _ time.Time) (runs.Run, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r, ok := f.runs[id]
+	if !ok || (key != nil && r.KeyID != *key) {
+		return runs.Run{}, runs.ErrNotFound
+	}
+	if r.Status.Terminal() {
+		return runs.Run{}, runs.ErrFinished
+	}
+	if r.Status != runs.WaitingHuman {
+		return runs.Run{}, runs.ErrNotWaiting
+	}
+	f.decisions = append(f.decisions, d)
+	if d.Decision == "approve" {
+		r.Status = runs.Running
+	} else {
+		r.Status, r.FailureReason = runs.Failed, runs.ReasonRejected
 	}
 	return *r, nil
 }
@@ -348,5 +371,42 @@ func TestRunsWithToolsMustNameRegisteredTools(t *testing.T) {
 	}
 	if len(r.store.runs) != 1 {
 		t.Errorf("a refused request must not create a run: %d runs", len(r.store.runs))
+	}
+}
+
+func TestApproveAndRejectOverTheAPI(t *testing.T) {
+	r := newRunsRig(t)
+	mk := func() uuid.UUID {
+		id := uuid.New()
+		r.store.mu.Lock()
+		r.store.runs[id] = &runs.Run{ID: id, KeyID: r.a, Status: runs.WaitingHuman, Request: runs.Request{Input: runs.Input{Text: "x"}}}
+		r.store.mu.Unlock()
+		return id
+	}
+	id := mk()
+	if code, body, _ := r.do(t, "POST", "/v1/runs/"+id.String()+"/approve", "", `{}`); code != 401 {
+		t.Errorf("no key: %d %v", code, body)
+	}
+	if code, body, _ := r.do(t, "POST", "/v1/runs/"+id.String()+"/approve", "key-b", `{}`); code != 404 || errCode(body) != "run_not_found" {
+		t.Errorf("another key: %d %v", code, body)
+	}
+	if code, _, _ := r.do(t, "POST", "/v1/runs/"+id.String()+"/approve", "key-a", `{"note":`); code != 400 {
+		t.Errorf("bad body: %d", code)
+	}
+	if code, body, _ := r.do(t, "POST", "/v1/runs/"+id.String()+"/approve", "key-a", `{"note":"looks fine"}`); code != 202 || body["status"] != "running" {
+		t.Fatalf("approve: %d %v", code, body)
+	}
+	if got := r.store.decisions; len(got) != 1 || got[0].Decision != "approve" || got[0].Note != "looks fine" || got[0].By != "api key key-a" {
+		t.Errorf("decision = %+v", got)
+	}
+	if code, body, _ := r.do(t, "POST", "/v1/runs/"+id.String()+"/approve", "key-a", ``); code != 409 || errCode(body) != "run_not_waiting" {
+		t.Errorf("second approve: %d %v", code, body)
+	}
+	id2 := mk()
+	if code, body, _ := r.do(t, "POST", "/v1/runs/"+id2.String()+"/reject", "key-a", `{"note":"no"}`); code != 202 || body["status"] != "failed" || body["failure_reason"] != "rejected" {
+		t.Errorf("reject: %d %v", code, body)
+	}
+	if code, body, _ := r.do(t, "POST", "/v1/runs/"+id2.String()+"/reject", "key-a", ``); code != 409 || errCode(body) != "run_finished" {
+		t.Errorf("reject finished: %d %v", code, body)
 	}
 }

@@ -139,8 +139,9 @@ func serve(ctx context.Context, args []string, getenv func(string) string, errOu
 			if workers <= 0 {
 				workers = cat.Runs.Workers
 			}
-			eng := &runs.Engine{Model: &runs.GatewayCaller{GW: gw, Keys: keyStore}, Tools: &tools.Executor{Source: toolStore, WebhookSecret: getenv("SPILLWAY_WEBHOOK_SECRET")},
-				Log: log, ToolBudget: cat.Runs.ToolErrorBudget}
+			caller := &runs.GatewayCaller{GW: gw, Keys: keyStore}
+			eng := &runs.Engine{Model: caller, Tools: &tools.Executor{Source: toolStore, WebhookSecret: getenv("SPILLWAY_WEBHOOK_SECRET")},
+				Compactor: &runs.ModelCompactor{Model: caller, Policy: cat.Runs.CompactionPolicy}, Log: log, ToolBudget: cat.Runs.ToolErrorBudget}
 			pool := runs.NewPool(runStore, eng, runs.PoolOptions{Workers: workers, LeaseTTL: cat.Runs.LeaseTTL, Heartbeat: cat.Runs.Heartbeat, Log: log})
 			poolDone = make(chan struct{})
 			go func() {
@@ -178,8 +179,9 @@ func serve(ctx context.Context, args []string, getenv func(string) string, errOu
 				pg_ := playground.NewService(gw, func(context.Context) (keys.Key, error) { return pkey, nil }, playground.NewStore(pg.Pool), cat.Playground.FaultInjection, log)
 				admin = api.NewAdmin(api.AdminDeps{Users: auth.NewUsers(pg.Pool, auth.DefaultParams), Keys: keyStore, Usage: usage.NewReader(pg.Pool), Health: gw.ProviderHealth, Latency: metrics,
 					Runs:   runs.NewReader(pg.Pool),
+					Tools:  &toolsAdmin{store: toolStore, exec: &tools.Executor{Source: toolStore}, now: time.Now},
 					Events: broker, RunStarter: starter{c: &runs.Creator{Store: runStore, Key: func(context.Context) (keys.Key, error) { return pkey, nil },
-						Caps: runs.Caps{MaxSteps: cat.Runs.MaxSteps, MaxCost: cat.Runs.MaxCost, Deadline: cat.Runs.Deadline}, Known: cat.Has}, s: runStore},
+						Caps: runs.Caps{MaxSteps: cat.Runs.MaxSteps, MaxCost: cat.Runs.MaxCost, Deadline: cat.Runs.Deadline}, Known: cat.Has, ToolsReady: true, MissingTools: toolStore.Missing}, s: runStore},
 					Playground: &api.PlaygroundDeps{Service: pg_, Catalog: gw.Catalog, Key: func(ctx context.Context, now time.Time) (keys.Stats, error) { return keyStore.Stats(ctx, pkey.ID, now) }},
 					Signer:     signer, Deps: deps, Log: log})
 			}
@@ -240,6 +242,30 @@ func (s starter) Create(ctx context.Context, req runs.Request, raw []byte) (runs
 	return s.c.Create(ctx, req, raw)
 }
 
+func (s starter) Decide(ctx context.Context, id uuid.UUID, d runs.Decision, now time.Time) (runs.Run, error) {
+	return s.s.Decide(ctx, id, nil, d, now)
+}
+
 func (s starter) CancelAny(ctx context.Context, id uuid.UUID, now time.Time) (runs.Run, error) {
 	return s.s.CancelAny(ctx, id, now)
+}
+
+// toolsAdmin is the registry for the admin API: the store, plus discovery, which needs the MCP client.
+type toolsAdmin struct {
+	store *tools.Store
+	exec  *tools.Executor
+	now   func() time.Time
+}
+
+func (t *toolsAdmin) List(ctx context.Context) ([]tools.Tool, error) { return t.store.List(ctx) }
+func (t *toolsAdmin) Create(ctx context.Context, p tools.CreateParams) (tools.Tool, error) {
+	return t.store.Create(ctx, p)
+}
+func (t *toolsAdmin) Update(ctx context.Context, id uuid.UUID, p tools.UpdateParams) (tools.Tool, error) {
+	return t.store.Update(ctx, id, p)
+}
+func (t *toolsAdmin) Delete(ctx context.Context, id uuid.UUID) error { return t.store.Delete(ctx, id) }
+
+func (t *toolsAdmin) Discover(ctx context.Context, id uuid.UUID) (tools.Tool, error) {
+	return tools.DiscoverAndStore(ctx, t.store, t.exec, id, t.now())
 }

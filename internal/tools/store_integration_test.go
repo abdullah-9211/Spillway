@@ -97,3 +97,46 @@ func TestCreateValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestMCPServerResolutionUpdateAndDelete(t *testing.T) {
+	pool, _ := testdb.New(t)
+	ctx := context.Background()
+	box, _ := secret.New(bytes.Repeat([]byte{9}, 32))
+	st := NewStore(pool, box)
+
+	srv, err := st.Create(ctx, CreateParams{Name: "files", Kind: MCP, Endpoint: "http://mcp.example/mcp", Headers: map[string]string{"Authorization": "Bearer t"}, RequiresApproval: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Not discovered yet: its tools are not usable.
+	if m, _ := st.Missing(ctx, []string{"files.read"}); len(m) != 1 {
+		t.Errorf("undiscovered: missing = %v", m)
+	}
+	if err := st.SetDiscovered(ctx, srv.ID, []MCPToolInfo{{Name: "read", Description: "Reads", InputSchema: json.RawMessage(`{"type":"object"}`)}}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.Get(ctx, []string{"files.read"})
+	if err != nil || got[0].Name != "files.read" || got[0].MCPTool != "read" || got[0].Kind != MCP || got[0].Headers["Authorization"] != "Bearer t" || !got[0].RequiresApproval || got[0].Description != "Reads" {
+		t.Fatalf("resolved = %+v %v", got, err)
+	}
+	if m, _ := st.Missing(ctx, []string{"files.read", "files.write", "files", "other.x"}); len(m) != 3 {
+		t.Errorf("missing = %v", m)
+	}
+	list, err := st.List(ctx)
+	if err != nil || len(list) != 1 || list[0].Discovered.IsZero() {
+		t.Errorf("list = %+v %v", list, err)
+	}
+
+	off := false
+	desc := "now documented"
+	up, err := st.Update(ctx, srv.ID, UpdateParams{RequiresApproval: &off, Description: &desc})
+	if err != nil || up.RequiresApproval || up.Description != desc || up.Headers["Authorization"] != "Bearer t" {
+		t.Errorf("update = %+v %v", up, err)
+	}
+	if err := st.Delete(ctx, srv.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Delete(ctx, srv.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("second delete: %v", err)
+	}
+}

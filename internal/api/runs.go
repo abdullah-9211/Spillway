@@ -25,6 +25,7 @@ type RunStore interface {
 	Steps(ctx context.Context, run uuid.UUID, after int64, limit int) ([]runs.Step, error)
 	FinalAnswer(ctx context.Context, run uuid.UUID) (string, error)
 	RequestCancel(ctx context.Context, id, key uuid.UUID, now time.Time) (runs.Run, error)
+	Decide(ctx context.Context, id uuid.UUID, key *uuid.UUID, d runs.Decision, now time.Time) (runs.Run, error)
 }
 
 // RunsOptions switch on the run endpoints under /v1/runs.
@@ -59,6 +60,8 @@ func (a *runsAPI) register(mux *http.ServeMux) {
 	mux.Handle("GET /v1/runs/{id}/steps", a.v1.withRequest(a.steps))
 	mux.Handle("GET /v1/runs/{id}/events", a.v1.withRequest(a.events))
 	mux.Handle("POST /v1/runs/{id}/cancel", a.v1.withRequest(a.cancel))
+	mux.Handle("POST /v1/runs/{id}/approve", a.v1.withRequest(a.decide("approve")))
+	mux.Handle("POST /v1/runs/{id}/reject", a.v1.withRequest(a.decide("reject")))
 }
 
 func (a *runsAPI) now() time.Time {
@@ -282,4 +285,52 @@ func (a *runsAPI) cancel(w http.ResponseWriter, r *http.Request, key keys.Key, r
 		return
 	}
 	writeJSON(w, 202, out)
+}
+
+// decide answers a run that waits for a person. The caller's key must be the one the run belongs to.
+func (a *runsAPI) decide(verb string) func(http.ResponseWriter, *http.Request, keys.Key, uuid.UUID) {
+	return func(w http.ResponseWriter, r *http.Request, key keys.Key, reqID uuid.UUID) {
+		id, ok := a.runID(w, r)
+		if !ok {
+			return
+		}
+		var body struct {
+			Note string `json:"note"`
+		}
+		if r.ContentLength != 0 {
+			raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 16<<10))
+			if err == nil && len(bytes.TrimSpace(raw)) > 0 {
+				err = json.Unmarshal(raw, &body)
+			}
+			if err != nil {
+				writeError(w, 400, "invalid_request_error", "invalid_request", "", "The body must be JSON like {\"note\": \"...\"}, 16 KB at most.")
+				return
+			}
+		}
+		if len(body.Note) > runs.MaxNoteBytes {
+			writeError(w, 400, "invalid_request_error", "invalid_request", "note", fmt.Sprintf("The note is limited to %d characters.", runs.MaxNoteBytes))
+			return
+		}
+		run, err := a.Store.Decide(r.Context(), id, &key.ID, runs.Decision{Decision: verb, By: "api key " + key.Name, Note: body.Note}, a.now())
+		switch {
+		case errors.Is(err, runs.ErrNotFound):
+			a.notFound(w)
+			return
+		case errors.Is(err, runs.ErrFinished):
+			writeError(w, 409, "invalid_request_error", "run_finished", "", "The run has already finished.")
+			return
+		case errors.Is(err, runs.ErrNotWaiting):
+			writeError(w, 409, "invalid_request_error", "run_not_waiting", "", "The run is not waiting for a decision.")
+			return
+		case err != nil:
+			a.internal(w, reqID, verb+" run", err)
+			return
+		}
+		out, err := a.view(r.Context(), run)
+		if err != nil {
+			a.internal(w, reqID, "read run output", err)
+			return
+		}
+		writeJSON(w, 202, out)
+	}
 }

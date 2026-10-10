@@ -91,22 +91,25 @@ type runsConfig struct {
 	MaxCostUSD      usdPerMtok    `yaml:"max_cost_usd"` // read as a dollar amount; the type is shared with prices
 	Deadline        time.Duration `yaml:"deadline"`
 	ToolErrorBudget int           `yaml:"tool_error_budget"`
+	// CompactionPolicy is the policy or model that writes compaction summaries; empty means the run's own.
+	CompactionPolicy string `yaml:"compaction_policy"`
 }
 
 // RunSettings are the run engine's timing and the caps no request can exceed.
 type RunSettings struct {
-	LeaseTTL        time.Duration
-	Heartbeat       time.Duration
-	Workers         int
-	MaxSteps        int
-	MaxCost         money.Micros
-	Deadline        time.Duration
-	ToolErrorBudget int
+	LeaseTTL         time.Duration
+	Heartbeat        time.Duration
+	Workers          int
+	MaxSteps         int
+	MaxCost          money.Micros
+	Deadline         time.Duration
+	ToolErrorBudget  int
+	CompactionPolicy string
 }
 
 func (r runsConfig) settings() (RunSettings, error) {
 	s := RunSettings{LeaseTTL: r.LeaseTTL, Heartbeat: r.Heartbeat, Workers: r.Workers, MaxSteps: r.MaxSteps,
-		MaxCost: money.Micros(r.MaxCostUSD), Deadline: r.Deadline, ToolErrorBudget: r.ToolErrorBudget}
+		MaxCost: money.Micros(r.MaxCostUSD), Deadline: r.Deadline, ToolErrorBudget: r.ToolErrorBudget, CompactionPolicy: r.CompactionPolicy}
 	if s.LeaseTTL <= 0 {
 		s.LeaseTTL = 30 * time.Second
 	}

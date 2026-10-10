@@ -24,6 +24,9 @@ const (
 	NodeFailed   = "failed"
 	NodeRunning  = "running"
 	NodeStopped  = "stopped"
+	// NodeWaiting is a wait_human step nobody has decided yet; NodeSleeping is a sleep step before its wake time.
+	NodeWaiting  = "waiting"
+	NodeSleeping = "sleeping"
 )
 
 // GraphNode is one attempt at one step. A step that was re-issued after a worker was lost appears once per attempt.
@@ -50,6 +53,25 @@ type GraphNode struct {
 	Result         string          `json:"result,omitempty"`
 	Message        string          `json:"message,omitempty"`
 	Error          string          `json:"error,omitempty"`
+	// wait_human: why, what is waiting (Gate), and the decision once there is one.
+	Reason   string `json:"reason,omitempty"`
+	Gate     bool   `json:"gate,omitempty"`
+	Decision string `json:"decision,omitempty"`
+	By       string `json:"by,omitempty"`
+	Note     string `json:"note,omitempty"`
+	// sleep: how long, and until when.
+	Seconds int        `json:"seconds,omitempty"`
+	WakeAt  *time.Time `json:"wake_at,omitempty"`
+}
+
+// GraphApproval is the pending approval of a run in waiting_human: what the card on the run page shows.
+type GraphApproval struct {
+	StepNo    int       `json:"step_no"`
+	Reason    string    `json:"reason"`
+	Tool      string    `json:"tool,omitempty"`
+	Arguments string    `json:"arguments,omitempty"`
+	Gate      bool      `json:"gate"`
+	Since     time.Time `json:"since"`
 }
 
 type GraphTokens struct {
@@ -92,6 +114,9 @@ type GraphRun struct {
 	LeaseOwner      *string    `json:"lease_owner"`
 	LeaseEpoch      int64      `json:"lease_epoch"`
 	LeaseExpiresAt  *time.Time `json:"lease_expires_at"`
+	WakeAt          *time.Time `json:"wake_at"`
+	// Approval is set while the run waits for a person.
+	Approval *GraphApproval `json:"approval"`
 }
 
 type Graph struct {
@@ -147,13 +172,24 @@ func BuildGraph(run GraphRun, steps []Step, uses map[string]UsageInfo, now time.
 		if s.StepNo == nil {
 			continue
 		}
-		if prev != nil && s.Epoch != prev.Epoch {
+		parkBoundary := prev != nil && (prev.Type == WaitHuman || prev.Type == Sleep) && s.Epoch != prev.Epoch &&
+			(prev.Phase.Terminal() || (prev.Phase == PhaseStarted && s.Type == prev.Type))
+		if prev != nil && s.Epoch != prev.Epoch && !parkBoundary {
 			g.Recoveries = append(g.Recoveries, Recovery{AfterStep: *prev.StepNo, FromWorker: prev.WorkerID, ToWorker: s.WorkerID, Epoch: s.Epoch, At: s.At})
 		}
 		prev = &steps[i]
 
 		k := nodeKey{*s.StepNo, s.Epoch}
 		a := nodes[k]
+		if a == nil && s.Phase.Terminal() && (s.Type == Sleep || s.Type == WaitHuman) {
+			// A sleep is woken, and a wait decided, in a later lease epoch than the one that started it. That is the
+			// same attempt finishing, not a new one.
+			for _, o := range order {
+				if o.n.StepNo == *s.StepNo && o.n.Type == s.Type {
+					a = o
+				}
+			}
+		}
 		if a == nil {
 			a = &acc{firstID: s.ID, n: GraphNode{StepNo: *s.StepNo, Type: s.Type, Worker: s.WorkerID, Epoch: s.Epoch, StartedAt: s.At, CostUSD: money.Micros(0).String(), Attempts: []usage.Attempt{}}}
 			nodes[k] = a
@@ -170,10 +206,22 @@ func BuildGraph(run GraphRun, steps []Step, uses map[string]UsageInfo, now time.
 				a.n.PreviousWorker, a.n.PreviousEpoch = p.PreviousWorker, p.PreviousEpoch
 			}
 		case PhaseStarted:
-			if s.Type == ToolCall {
+			switch s.Type {
+			case ToolCall:
 				var p ToolStarted
 				if json.Unmarshal(s.Payload, &p) == nil {
 					a.n.Tool, a.n.Arguments = p.Tool, clip(string(p.Arguments))
+				}
+			case WaitHuman:
+				var p WaitStarted
+				if json.Unmarshal(s.Payload, &p) == nil {
+					a.n.Reason, a.n.Gate, a.n.Tool, a.n.Arguments = p.Reason, !p.Builtin, p.Tool, clip(string(p.Arguments))
+				}
+			case Sleep:
+				var p SleepStarted
+				if json.Unmarshal(s.Payload, &p) == nil && !p.WakeAt.IsZero() {
+					w := p.WakeAt
+					a.n.Seconds, a.n.WakeAt = p.Seconds, &w
 				}
 			}
 		case PhaseFinished, PhaseFailed:
@@ -212,6 +260,10 @@ func BuildGraph(run GraphRun, steps []Step, uses map[string]UsageInfo, now time.
 			n.State = NodeFinished
 		case later || ended:
 			n.State = NodeStopped
+		case n.Type == WaitHuman && run.Status == WaitingHuman:
+			n.State = NodeWaiting
+		case n.Type == Sleep && run.Status == Sleeping:
+			n.State = NodeSleeping
 		default:
 			n.State = NodeRunning
 		}
@@ -219,9 +271,15 @@ func BuildGraph(run GraphRun, steps []Step, uses map[string]UsageInfo, now time.
 		case NodeFinished, NodeFailed:
 			d := a.terminal.At.Sub(n.StartedAt).Milliseconds()
 			n.DurationMs = &d
-		case NodeRunning:
+		case NodeRunning, NodeWaiting, NodeSleeping:
 			d := max(now.Sub(n.StartedAt).Milliseconds(), 0)
 			n.DurationMs = &d
+		}
+		if n.State == NodeWaiting {
+			g.Run.Approval = &GraphApproval{StepNo: n.StepNo, Reason: n.Reason, Tool: n.Tool, Arguments: n.Arguments, Gate: n.Gate, Since: n.StartedAt}
+		}
+		if n.State == NodeSleeping {
+			g.Run.WakeAt = n.WakeAt
 		}
 		if a.terminal != nil {
 			fillResult(n, a.terminal, uses)
@@ -254,6 +312,14 @@ func fillResult(n *GraphNode, t *Step, uses map[string]UsageInfo) {
 		var p ToolFinished
 		_ = json.Unmarshal(t.Payload, &p)
 		n.Result = clip(p.Result)
+	case t.Type == WaitHuman:
+		var p Decision
+		_ = json.Unmarshal(t.Payload, &p)
+		n.Decision, n.By, n.Note = p.Decision, p.By, clip(p.Note)
+	case t.Type == Compaction:
+		var p CompactionFinished
+		_ = json.Unmarshal(t.Payload, &p)
+		n.Message = clip(p.Summary)
 	case t.Type == ModelCall:
 		var p ModelFinished
 		if json.Unmarshal(t.Payload, &p) != nil {

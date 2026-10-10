@@ -52,6 +52,8 @@ type AdminDeps struct {
 	Runs RunsAdmin
 	// RunStarter, when set with Runs, adds POST /admin/runs and POST /admin/runs/{id}/cancel (admin only).
 	RunStarter RunStarter
+	// Tools, when set, serves /admin/tools.
+	Tools ToolsAdmin
 	// Events, when set with Runs, adds GET /admin/runs/{id}/events (server-sent events).
 	Events Events
 	// Now is the clock for run reads; tests set it. Zero means time.Now.
@@ -105,6 +107,9 @@ func NewAdmin(d AdminDeps) *Admin {
 	}
 	if d.Runs != nil {
 		a.registerRuns()
+	}
+	if d.Tools != nil {
+		a.registerTools()
 	}
 	return a
 }

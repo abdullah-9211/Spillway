@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -80,9 +80,22 @@ type Log interface {
 	Append(ctx context.Context, s NewStep) (Step, error)
 }
 
+// ApprovalPolicy is optionally implemented by a ToolRunner: it says whether a registered tool needs a person's approval
+// before each call.
+type ApprovalPolicy interface {
+	RequiresApproval(ctx context.Context, name string) (bool, error)
+}
+
+// Compactor summarises the older part of a run's conversation so the run can go on past the model's context. The default
+// asks a model; the hook is an interface so it can be replaced.
+type Compactor interface {
+	Summarise(ctx context.Context, run Run, msgs []provider.Message) (summary string, cost money.Micros, err error)
+}
+
 type Engine struct {
 	Model        ModelCaller
 	Tools        ToolRunner // optional
+	Compactor    Compactor  // optional: without one a long run is never compacted
 	Now          func() time.Time
 	Sleep        func(ctx context.Context, d time.Duration) error
 	Backoff      func(attempt int) time.Duration
@@ -145,6 +158,8 @@ type exec struct {
 	run Run
 	log Log
 	st  *State
+	// compactBroken is set when a compaction failed, so this worker does not keep trying and spending steps.
+	compactBroken bool
 }
 
 // Execute carries a run forward from whatever its steps say, until it ends or this worker has to stop. It returns nil
@@ -174,6 +189,10 @@ func (e *Engine) Execute(ctx context.Context, run Run, log Log, steps []Step) er
 				if reason := x.limit(); reason != "" {
 					return x.endRun(ctx, Failed, reason, "")
 				}
+				if through, ok := x.wantsCompaction(); ok {
+					err = x.compact(ctx, Action{Kind: StartModel, StepNo: act.StepNo, Replaces: through})
+					break
+				}
 			}
 			err = x.model(ctx, act)
 		case RunTool, ResumeTool:
@@ -182,7 +201,17 @@ func (e *Engine) Execute(ctx context.Context, run Run, log Log, steps []Step) er
 					return x.endRun(ctx, Failed, reason, "")
 				}
 			}
-			err = x.tool(ctx, act)
+			err = x.dispatchTool(ctx, act)
+		case ResumeSleep:
+			err = x.wake(ctx, act)
+		case ParkHuman:
+			// Not reachable through a claim (a run waiting for a person is never claimable), but if it happens, say so and wait.
+			if err := x.write(ctx, NewStep{Type: RunStatus, Phase: PhaseFinished, Payload: StatusPayload{Status: WaitingHuman}}); err != nil {
+				return err
+			}
+			return ErrParked
+		case ResumeCompaction:
+			err = x.compact(ctx, act)
 		default:
 			return x.endRun(ctx, Failed, ReasonProviderFailed, fmt.Sprintf("step %d is of a type this worker cannot resume", act.StepNo))
 		}
@@ -263,12 +292,13 @@ func (x *exec) model(ctx context.Context, act Action) error {
 	if err := x.open(ctx, act, ModelCall, "", ModelStarted{Policy: x.run.Request.ModelName(), MessageCount: len(msgs)}); err != nil {
 		return err
 	}
-	var tools []provider.Tool
+	tools := builtinSpecs()
 	if x.e.Tools != nil && len(x.run.Request.Tools) > 0 {
-		var err error
-		if tools, err = x.e.Tools.Specs(x.run.Request.Tools); err != nil {
+		specs, err := x.e.Tools.Specs(x.run.Request.Tools)
+		if err != nil {
 			return x.failStep(ctx, n, ModelCall, ReasonToolFailed, err.Error())
 		}
+		tools = append(specs, tools...)
 	}
 	callCtx, cancel := context.WithDeadline(ctx, x.run.DeadlineAt)
 	defer cancel()
@@ -341,13 +371,14 @@ func (x *exec) tool(ctx context.Context, act Action) error {
 	}
 	var result string
 	var callErr error
+	orig, allowed := x.resolve(call.Function.Name)
 	switch {
-	case !slices.Contains(x.run.Request.Tools, call.Function.Name):
+	case !allowed:
 		callErr = fmt.Errorf("tool %q is not allowed in this run", call.Function.Name) // fed back to the model
 	case x.e.Tools == nil:
 		callErr = fmt.Errorf("tool %q is not available", call.Function.Name)
 	default:
-		result, callErr = x.e.Tools.Call(ctx, ToolInvocation{RunID: x.run.ID, StepNo: n, Name: call.Function.Name, Arguments: args, IdempotencyKey: key})
+		result, callErr = x.e.Tools.Call(ctx, ToolInvocation{RunID: x.run.ID, StepNo: n, Name: orig, Arguments: args, IdempotencyKey: key})
 	}
 	if callErr != nil && ctx.Err() != nil {
 		return x.stopped(ctx, &n)
@@ -362,4 +393,222 @@ func (x *exec) tool(ctx context.Context, act Action) error {
 		return x.endRun(ctx, Failed, ReasonToolFailed, fmt.Sprintf("%d tool calls in a row failed; the last: %v", x.st.ToolErrors(), callErr))
 	}
 	return nil
+}
+
+// --- built-in tools, approvals, sleeping and compaction ---
+
+const (
+	BuiltinSleep    = "sleep"
+	BuiltinApproval = "request_human_approval"
+	maxSleepSeconds = 86400
+)
+
+func builtinSpecs() []provider.Tool {
+	return []provider.Tool{
+		{Type: "function", Function: provider.ToolFunction{Name: BuiltinSleep, Description: "Wait for a number of seconds, then continue. Use it to poll or to wait for something that takes time.",
+			Parameters: json.RawMessage(`{"type":"object","properties":{"seconds":{"type":"integer","minimum":1,"maximum":86400}},"required":["seconds"]}`)}},
+		{Type: "function", Function: provider.ToolFunction{Name: BuiltinApproval, Description: "Ask a person to approve before you go on. Say what you want to do and why.",
+			Parameters: json.RawMessage(`{"type":"object","properties":{"reason":{"type":"string"}},"required":["reason"]}`)}},
+	}
+}
+
+// ModelName is how a registered tool is named to the model: some providers do not allow a dot, which MCP tool names
+// ("server.tool") contain.
+func ModelName(registered string) string { return strings.ReplaceAll(registered, ".", "__") }
+
+// resolve maps the name the model used to the registered tool it is allowed to call.
+func (x *exec) resolve(callName string) (string, bool) {
+	for _, t := range x.run.Request.Tools {
+		if t == callName || ModelName(t) == callName {
+			return t, true
+		}
+	}
+	return "", false
+}
+
+func (x *exec) needsApproval(ctx context.Context, orig string) bool {
+	for _, t := range x.run.Request.ApprovalRequired {
+		if t == orig || ModelName(t) == orig {
+			return true
+		}
+	}
+	if ap, ok := x.e.Tools.(ApprovalPolicy); ok && x.e.Tools != nil {
+		need, err := ap.RequiresApproval(ctx, orig)
+		return err == nil && need
+	}
+	return false
+}
+
+// dispatchTool runs a pending tool call: a built-in, a gated tool (which first waits for approval), or a plain tool.
+func (x *exec) dispatchTool(ctx context.Context, act Action) error {
+	name := act.Call.Function.Name
+	switch name {
+	case BuiltinSleep:
+		return x.sleep(ctx, act)
+	case BuiltinApproval:
+		return x.waitForPerson(ctx, act, WaitStarted{Reason: reasonOf(act.Call.Function.Arguments), ToolCallID: act.Call.ID, Builtin: true})
+	}
+	if act.Kind == RunTool {
+		if orig, ok := x.resolve(name); ok && !x.st.Approved(act.Call.ID) && x.needsApproval(ctx, orig) {
+			args := json.RawMessage(act.Call.Function.Arguments)
+			if !json.Valid(args) {
+				args, _ = json.Marshal(act.Call.Function.Arguments)
+			}
+			return x.waitForPerson(ctx, act, WaitStarted{Reason: "Approval needed to call " + orig, Tool: orig, Arguments: args, ToolCallID: act.Call.ID})
+		}
+	}
+	return x.tool(ctx, act)
+}
+
+func reasonOf(args string) string {
+	var a struct {
+		Reason string `json:"reason"`
+	}
+	if json.Unmarshal([]byte(args), &a) == nil && strings.TrimSpace(a.Reason) != "" {
+		return strings.TrimSpace(a.Reason)
+	}
+	return "The model asked for approval to continue."
+}
+
+// waitForPerson opens a wait_human step and parks the run. Nothing runs until a person decides.
+func (x *exec) waitForPerson(ctx context.Context, act Action, p WaitStarted) error {
+	if err := x.write(ctx, NewStep{StepNo: ptr(act.StepNo), Type: WaitHuman, Phase: PhaseStarted, Payload: p}); err != nil {
+		return err
+	}
+	return ErrParked
+}
+
+// sleep starts a sleep step and parks the run until its wake time.
+func (x *exec) sleep(ctx context.Context, act Action) error {
+	var a struct {
+		Seconds int `json:"seconds"`
+	}
+	_ = json.Unmarshal([]byte(act.Call.Function.Arguments), &a)
+	n := act.StepNo
+	started := SleepStarted{Seconds: a.Seconds, WakeAt: x.e.now().Add(time.Duration(a.Seconds) * time.Second), ToolCallID: act.Call.ID}
+	bad := ""
+	switch {
+	case a.Seconds < 1 || a.Seconds > maxSleepSeconds:
+		bad = fmt.Sprintf("seconds must be a whole number from 1 to %d", maxSleepSeconds)
+	case !started.WakeAt.Before(x.run.DeadlineAt):
+		bad = "sleeping that long would pass the run's deadline"
+	}
+	if bad != "" { // fed back to the model as the call's result
+		if err := x.write(ctx, NewStep{StepNo: ptr(n), Type: Sleep, Phase: PhaseStarted, Payload: SleepStarted{ToolCallID: act.Call.ID}}); err != nil {
+			return err
+		}
+		return x.write(ctx, NewStep{StepNo: ptr(n), Type: Sleep, Phase: PhaseFailed, Payload: ErrorPayload{Error: bad}})
+	}
+	if err := x.write(ctx, NewStep{StepNo: ptr(n), Type: Sleep, Phase: PhaseStarted, Payload: started}); err != nil {
+		return err
+	}
+	return ErrParked
+}
+
+// wake finishes a sleep whose time has come. A worker is only handed a sleeping run at its wake time, so a sleep that
+// still has time left (an early claim) parks again rather than cutting the wait short.
+func (x *exec) wake(ctx context.Context, act Action) error {
+	if x.e.now().Before(act.Sleep.WakeAt) {
+		if err := x.write(ctx, NewStep{Type: RunStatus, Phase: PhaseFinished, Payload: StatusPayload{Status: Sleeping}}); err != nil {
+			return err
+		}
+		return ErrParked
+	}
+	return x.write(ctx, NewStep{StepNo: ptr(act.StepNo), Type: Sleep, Phase: PhaseFinished, Payload: struct{}{}})
+}
+
+const (
+	defaultCompactTokens = 24000
+	defaultKeepTurns     = 6
+)
+
+// wantsCompaction: the history has outgrown the threshold and there is something older than the last few turns to fold.
+func (x *exec) wantsCompaction() (int, bool) {
+	if x.e.Compactor == nil || x.compactBroken {
+		return 0, false
+	}
+	threshold, keep := defaultCompactTokens, defaultKeepTurns
+	if c := x.run.Request.Compaction; c != nil {
+		if c.ThresholdTokens > 0 {
+			threshold = c.ThresholdTokens
+		}
+		if c.KeepLastTurns > 0 {
+			keep = c.KeepLastTurns
+		}
+	}
+	if EstimateTokens(x.st.Messages()) < threshold {
+		return 0, false
+	}
+	through, _, ok := x.st.CompactionPlan(keep)
+	return through, ok
+}
+
+// compact summarises the older turns as a compaction step. A failure is recorded and the run goes on without it.
+func (x *exec) compact(ctx context.Context, act Action) error {
+	n := act.StepNo
+	reissue := act.Kind == ResumeCompaction
+	through := act.Replaces
+	if err := x.open(ctx, Action{Kind: map[bool]Frontier{true: ResumeModel, false: StartModel}[reissue], StepNo: n, PreviousWorker: act.PreviousWorker, PreviousEpoch: act.PreviousEpoch},
+		Compaction, "", CompactionStarted{ReplacesThroughStep: through}); err != nil {
+		return err
+	}
+	var msgs []provider.Message
+	for _, e := range x.st.entries {
+		if e.step != -1 && e.step <= through {
+			msgs = append(msgs, e.msg)
+		}
+	}
+	cctx, cancel := context.WithDeadline(ctx, x.run.DeadlineAt)
+	defer cancel()
+	summary, cost, err := x.e.Compactor.Summarise(cctx, x.run, msgs)
+	if err != nil {
+		if ctx.Err() != nil {
+			return x.stopped(ctx, &n)
+		}
+		x.compactBroken = true
+		x.e.logger().Warn("compaction failed, going on without it", "run_id", x.run.ID, "error", err)
+		return x.write(ctx, NewStep{StepNo: ptr(n), Type: Compaction, Phase: PhaseFailed, Payload: ErrorPayload{Error: err.Error()}})
+	}
+	return x.write(ctx, NewStep{StepNo: ptr(n), Type: Compaction, Phase: PhaseFinished, Cost: cost, Payload: CompactionFinished{Summary: summary}})
+}
+
+// ModelCompactor is the default Compactor: it asks a model, through the same gateway path as the run's own calls.
+type ModelCompactor struct {
+	Model  ModelCaller
+	Policy string // the policy or model to use; empty means the run's own
+}
+
+func (c *ModelCompactor) Summarise(ctx context.Context, run Run, msgs []provider.Message) (string, money.Micros, error) {
+	var b strings.Builder
+	for _, m := range msgs {
+		switch m.Role {
+		case "tool":
+			fmt.Fprintf(&b, "[tool result] %s\n", m.Content.PlainText())
+		default:
+			text := m.Content.PlainText()
+			for _, tc := range m.ToolCalls {
+				text += fmt.Sprintf(" [asked for %s(%s)]", tc.Function.Name, tc.Function.Arguments)
+			}
+			fmt.Fprintf(&b, "[%s] %s\n", m.Role, strings.TrimSpace(text))
+		}
+	}
+	r := run
+	if c.Policy != "" {
+		req := r.Request
+		req.Model = c.Policy
+		r.Request = req
+	}
+	id, _ := uuid.NewV7()
+	res, err := c.Model.Call(ctx, r, []provider.Message{
+		{Role: "system", Content: provider.TextContent("Summarise this conversation between an agent and its tools so the agent can continue the task from the summary alone. Keep facts, decisions, results and what is still to do. Be concise.")},
+		{Role: "user", Content: provider.TextContent(b.String())},
+	}, nil, id)
+	if err != nil {
+		return "", 0, err
+	}
+	text := strings.TrimSpace(res.Message.Content.PlainText())
+	if text == "" {
+		return "", 0, errors.New("the summary was empty")
+	}
+	return text, res.Cost, nil
 }

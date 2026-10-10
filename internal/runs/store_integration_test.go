@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/abdullah-9211/spillway/internal/keys"
+	"github.com/abdullah-9211/spillway/internal/provider"
 	"github.com/abdullah-9211/spillway/internal/testdb"
 )
 
@@ -509,5 +510,129 @@ func TestAdminCancelAnyAndTheDashboardCreator(t *testing.T) {
 	}
 	if _, err := e.store.CancelAny(ctx, uuid.New(), t0); !errors.Is(err, ErrNotFound) {
 		t.Errorf("unknown: %v", err)
+	}
+}
+
+// --- approvals and sleeping against the real database ---
+
+func approvalModel() *fnModel {
+	return &fnModel{turns: func(n int, msgs []provider.Message) provider.Message {
+		if n == 0 {
+			return toolCall("c0", BuiltinApproval, `{"reason":"ship it?"}`)
+		}
+		return provider.Message{Role: "assistant", Content: provider.TextContent("result: " + lastToolText(msgs))}
+	}}
+}
+
+func TestApprovalParksTheRunAndAnApproveResumesItOnAnotherWorker(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	run := e.create(t, "", Request{Input: Input{Text: "go"}}, t0)
+	clock := func() time.Time { return t0 }
+
+	w1 := poolFor(e, approvalModel(), nil, "w-1", clock)
+	if found, err := w1.ClaimAndWork(ctx, ctx); err != nil || !found {
+		t.Fatalf("%v %v", found, err)
+	}
+	got, _ := e.store.Get(ctx, run.ID)
+	if got.Status != WaitingHuman {
+		t.Fatalf("status = %s", got.Status)
+	}
+	// Parked: nobody claims it, however long we wait.
+	later := poolFor(e, approvalModel(), nil, "w-2", func() time.Time { return t0.Add(48 * time.Hour) })
+	if found, _ := later.ClaimAndWork(ctx, ctx); found {
+		t.Fatal("a waiting run was claimed")
+	}
+
+	// w-1 is gone for good. The approval is a row in the log; any worker continues.
+	r, err := e.store.Decide(ctx, run.ID, &e.key.ID, Decision{Decision: "approve", By: "ana", Note: "ok"}, t0.Add(time.Minute))
+	if err != nil || r.Status != Running {
+		t.Fatalf("decide: %+v %v", r, err)
+	}
+	if _, err := e.store.Decide(ctx, run.ID, &e.key.ID, Decision{Decision: "approve", By: "ana"}, t0); !errors.Is(err, ErrNotWaiting) {
+		t.Errorf("second decision: %v", err)
+	}
+	w2 := poolFor(e, approvalModel(), nil, "w-2", func() time.Time { return t0.Add(2 * time.Minute) })
+	if found, err := w2.ClaimAndWork(ctx, ctx); err != nil || !found {
+		t.Fatalf("resume: %v %v", found, err)
+	}
+	got, _ = e.store.Get(ctx, run.ID)
+	if got.Status != Succeeded {
+		t.Fatalf("status = %s", got.Status)
+	}
+	if a, _ := e.store.FinalAnswer(ctx, run.ID); a != "result: Approved by ana. Note: ok" {
+		t.Errorf("answer = %q", a)
+	}
+	checkStepNumbers(t, e.rows(t, run.ID))
+}
+
+func TestRejectFailsTheRunAndDecideChecksOwnership(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	run := e.create(t, "", Request{Input: Input{Text: "go"}}, t0)
+	if _, err := e.store.Decide(ctx, run.ID, &e.key.ID, Decision{Decision: "approve", By: "a"}, t0); !errors.Is(err, ErrNotWaiting) {
+		t.Errorf("deciding a queued run: %v", err)
+	}
+	p := poolFor(e, approvalModel(), nil, "w-1", func() time.Time { return t0 })
+	if found, err := p.ClaimAndWork(ctx, ctx); err != nil || !found {
+		t.Fatal(found, err)
+	}
+	other := uuid.New()
+	if _, err := e.store.Decide(ctx, run.ID, &other, Decision{Decision: "reject", By: "a"}, t0); !errors.Is(err, ErrNotFound) {
+		t.Errorf("another key: %v", err)
+	}
+	r, err := e.store.Decide(ctx, run.ID, nil, Decision{Decision: "reject", By: "admin", Note: "too risky"}, t0.Add(time.Second))
+	if err != nil || r.Status != Failed || r.FailureReason != ReasonRejected || r.FinishedAt == nil {
+		t.Fatalf("reject: %+v %v", r, err)
+	}
+	if _, err := e.store.Decide(ctx, run.ID, nil, Decision{Decision: "approve", By: "a"}, t0); !errors.Is(err, ErrFinished) {
+		t.Errorf("deciding a finished run: %v", err)
+	}
+	want := []string{"run_status queued", "run_status running", "1 model_call started", "1 model_call finished", "2 wait_human started", "2 wait_human finished", "run_status failed:rejected"}
+	if got := outline(e.rows(t, run.ID)); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("rows = %v", got)
+	}
+}
+
+func TestSleepingRunWakesOnlyAtItsTime(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	m := &fnModel{turns: func(n int, msgs []provider.Message) provider.Message {
+		if n == 0 {
+			return toolCall("c0", BuiltinSleep, `{"seconds":600}`)
+		}
+		return provider.Message{Role: "assistant", Content: provider.TextContent(lastToolText(msgs))}
+	}}
+	run := e.create(t, "", Request{Input: Input{Text: "go"}}, t0)
+	if found, err := poolFor(e, m, nil, "w-1", func() time.Time { return t0 }).ClaimAndWork(ctx, ctx); err != nil || !found {
+		t.Fatal(found, err)
+	}
+	got, _ := e.store.Get(ctx, run.ID)
+	if got.Status != Sleeping {
+		t.Fatalf("status = %s", got.Status)
+	}
+	var wake *time.Time
+	if err := e.pool.QueryRow(ctx, `SELECT wake_at FROM runs WHERE id=$1`, run.ID).Scan(&wake); err != nil || wake == nil || !wake.Equal(t0.Add(600*time.Second)) {
+		t.Fatalf("wake_at = %v %v", wake, err)
+	}
+	if found, _ := poolFor(e, m, nil, "w-2", func() time.Time { return t0.Add(599 * time.Second) }).ClaimAndWork(ctx, ctx); found {
+		t.Fatal("woke early")
+	}
+	if found, err := poolFor(e, m, nil, "w-2", func() time.Time { return t0.Add(601 * time.Second) }).ClaimAndWork(ctx, ctx); err != nil || !found {
+		t.Fatal(found, err)
+	}
+	got, _ = e.store.Get(ctx, run.ID)
+	if got.Status != Succeeded {
+		t.Fatalf("status = %s", got.Status)
+	}
+	if err := e.pool.QueryRow(ctx, `SELECT wake_at FROM runs WHERE id=$1`, run.ID).Scan(&wake); err != nil || wake != nil {
+		t.Errorf("wake_at should be cleared: %v %v", wake, err)
+	}
+	// A sleeping or waiting run is cancelled on the spot.
+	r2 := e.create(t, "two", Request{Input: Input{Text: "go"}}, t0)
+	_, _ = poolFor(e, m, nil, "w-1", func() time.Time { return t0 }).ClaimAndWork(ctx, ctx)
+	c, err := e.store.RequestCancel(ctx, r2.ID, e.key.ID, t0.Add(time.Second))
+	if err != nil || c.Status != Cancelled {
+		t.Errorf("cancel while sleeping: %+v %v", c, err)
 	}
 }

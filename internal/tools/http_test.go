@@ -166,13 +166,13 @@ func TestFailuresAreErrorsTheModelCanRead(t *testing.T) {
 			t.Errorf("err = %v", err)
 		}
 	})
-	t.Run("an unknown tool and an mcp tool", func(t *testing.T) {
+	t.Run("an unknown tool and an unreachable mcp server", func(t *testing.T) {
 		ex := &Executor{Source: memSource{"m": {Name: "m", Kind: MCP, Endpoint: "http://x"}}}
 		if _, err := ex.Call(context.Background(), inv("nope")); err == nil {
 			t.Error("unknown tool")
 		}
-		if _, err := ex.Call(context.Background(), inv("m")); err == nil || !strings.Contains(err.Error(), "mcp") {
-			t.Errorf("mcp: %v", err)
+		if _, err := ex.Call(context.Background(), inv("m")); err == nil {
+			t.Error("an unreachable MCP server must be an error")
 		}
 	})
 }

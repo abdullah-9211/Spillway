@@ -74,6 +74,11 @@ var (
 	ErrNotFound = errors.New("runs: no such run")
 	// ErrFinished: the run already ended.
 	ErrFinished = errors.New("runs: the run already finished")
+	// ErrParked is what Execute returns when the run stopped to wait (for a person, or until a time). The run is not over
+	// and not abandoned: its status says what it waits for, and whoever resolves that makes it claimable again.
+	ErrParked = errors.New("runs: the run is parked")
+	// ErrNotWaiting: an approval was sent for a run that is not waiting for one.
+	ErrNotWaiting = errors.New("runs: the run is not waiting for a decision")
 	// ErrIdempotencyConflict: the Idempotency-Key was used before with a different request body.
 	ErrIdempotencyConflict = errors.New("runs: the idempotency key was used with a different request")
 )
@@ -192,6 +197,33 @@ type StatusPayload struct {
 	Status Status `json:"status"`
 	Reason string `json:"reason,omitempty"`
 	Detail string `json:"detail,omitempty"`
+}
+
+// SleepStarted is the payload of a started sleep step: the model asked to wait.
+type SleepStarted struct {
+	Seconds    int       `json:"seconds"`
+	WakeAt     time.Time `json:"wake_at"`
+	ToolCallID string    `json:"tool_call_id"`
+}
+
+// WaitStarted is the payload of a started wait_human step. Builtin is the model calling request_human_approval; otherwise
+// it is the gate before a tool that needs approval, and Tool and Arguments say what is waiting to run.
+type WaitStarted struct {
+	Reason     string          `json:"reason"`
+	Tool       string          `json:"tool,omitempty"`
+	Arguments  json.RawMessage `json:"arguments,omitempty"`
+	ToolCallID string          `json:"tool_call_id"`
+	Builtin    bool            `json:"builtin"`
+}
+
+// MaxNoteBytes bounds the note that goes with a decision; it ends up in the conversation the model reads.
+const MaxNoteBytes = 2000
+
+// Decision is the payload of a finished wait_human step.
+type Decision struct {
+	Decision string `json:"decision"` // approve | reject
+	By       string `json:"by"`
+	Note     string `json:"note,omitempty"`
 }
 
 type CompactionStarted struct {

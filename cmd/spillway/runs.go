@@ -20,6 +20,8 @@ const runsUsage = `usage:
   spillway runs get ID                       show a run
   spillway runs steps ID [--after N]         show a run's step rows
   spillway runs cancel ID                    cancel a run
+  spillway runs approve ID [--note TEXT]     approve a run that waits for a person
+  spillway runs reject ID [--note TEXT]      reject it; the run ends as failed (rejected)
 
 These talk to a running service over HTTP, as any API client would.
 flags (all subcommands): --url (SPILLWAY_URL, default http://localhost:8080)  --key (SPILLWAY_API_KEY)  --json
@@ -126,7 +128,7 @@ func runsCmd(ctx context.Context, args []string, getenv func(string) string, std
 	base := fs.String("url", envOr(getenv, "SPILLWAY_URL", "http://localhost:8080"), "service URL")
 	key := fs.String("key", getenv("SPILLWAY_API_KEY"), "API key")
 	asJSON := fs.Bool("json", false, "print the raw JSON")
-	var model, system, idem, maxCost, toolList string
+	var model, system, idem, maxCost, toolList, note string
 	var maxSteps, deadline int
 	var wait bool
 	var after int64
@@ -142,6 +144,8 @@ func runsCmd(ctx context.Context, args []string, getenv func(string) string, std
 		fs.BoolVar(&wait, "wait", false, "wait for the run to end, printing each status change")
 	case "steps":
 		fs.Int64Var(&after, "after", 0, "only rows with an id greater than this")
+	case "approve", "reject":
+		fs.StringVar(&note, "note", "", "a note that goes with the decision; the model reads it")
 	case "get", "cancel":
 	case "-h", "--help", "help":
 		fmt.Fprint(stdout, runsUsage)
@@ -260,6 +264,26 @@ func runsCmd(ctx context.Context, args []string, getenv func(string) string, std
 			return err
 		}
 		raw, err := c.do(ctx, "POST", "/v1/runs/"+url.PathEscape(id)+"/cancel", nil, nil)
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			fmt.Fprintln(stdout, string(raw))
+			return nil
+		}
+		var v runView
+		if err := json.Unmarshal(raw, &v); err != nil {
+			return err
+		}
+		printRun(stdout, v)
+		return nil
+
+	case "approve", "reject":
+		id, err := needID()
+		if err != nil {
+			return err
+		}
+		raw, err := c.do(ctx, "POST", "/v1/runs/"+url.PathEscape(id)+"/"+sub, map[string]string{"note": note}, nil)
 		if err != nil {
 			return err
 		}

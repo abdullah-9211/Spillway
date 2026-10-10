@@ -31,12 +31,16 @@ type RunsAdmin interface {
 type RunStarter interface {
 	Create(ctx context.Context, req runs.Request, raw []byte) (runs.Run, error)
 	CancelAny(ctx context.Context, id uuid.UUID, now time.Time) (runs.Run, error)
+	// Decide approves or rejects a run waiting for a person, whichever key owns it.
+	Decide(ctx context.Context, id uuid.UUID, d runs.Decision, now time.Time) (runs.Run, error)
 }
 
 func (a *Admin) registerRuns() {
 	if a.d.RunStarter != nil {
 		a.handle("POST", "/admin/runs", AccessAdmin, a.runsCreate)
 		a.handle("POST", "/admin/runs/{id}/cancel", AccessAdmin, a.runsCancel)
+		a.handle("POST", "/admin/runs/{id}/approve", AccessAdmin, a.runsDecide("approve"))
+		a.handle("POST", "/admin/runs/{id}/reject", AccessAdmin, a.runsDecide("reject"))
 	}
 	a.handle("GET", "/admin/runs/summary", AccessViewer, a.runsSummary)
 	a.handle("GET", "/admin/runs/activity", AccessViewer, a.runsActivity)

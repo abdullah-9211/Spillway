@@ -177,6 +177,14 @@ func (p *Pool) work(drain context.Context, r *Run) error {
 	switch {
 	case err == nil:
 		log.Info("run finished")
+	case errors.Is(err, ErrParked):
+		// Waiting for a person or for a wake time. Give the lease up so a wake or a decision is picked up at once.
+		rctx, c := context.WithTimeout(context.Background(), 5*time.Second)
+		defer c()
+		if rerr := p.store.Release(rctx, lease, p.o.Now()); rerr != nil {
+			log.Warn("could not release the lease of a parked run", "error", rerr)
+		}
+		log.Info("run parked")
 	case errors.Is(err, ErrAbandoned):
 		if errors.Is(context.Cause(runCtx), ErrShutdown) {
 			rctx, c := context.WithTimeout(context.Background(), 5*time.Second)
