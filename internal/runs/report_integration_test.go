@@ -263,3 +263,60 @@ func TestReaderListFiltersStripsAndPaging(t *testing.T) {
 		t.Errorf("unknown run: %v", err)
 	}
 }
+
+func TestReaderSearchAndKeyFilter(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	rd := NewReader(e.pool)
+	now := time.Now().UTC()
+	a := e.fixture(t, "Research competitor PRICING for 40 vendors", Running, now.Add(-time.Minute), nil, "", "")
+	e.fixture(t, "Draft the weekly digest", Running, now.Add(-2*time.Minute), nil, "", "")
+	e.fixture(t, "Cover 100% of the cases_with_underscores", Running, now.Add(-3*time.Minute), nil, "", "")
+	other := e.fixture(t, "Pricing for someone else", Running, now.Add(-4*time.Minute), nil, "", "")
+	k2 := newEnvKey(t, e, "other-key")
+	if _, err := e.pool.Exec(ctx, `UPDATE runs SET api_key_id=$2 WHERE id=$1`, other.id, k2); err != nil {
+		t.Fatal(err)
+	}
+	find := func(f ListFilter) int {
+		f.State = "active"
+		items, err := rd.List(ctx, f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(items)
+	}
+	if n := find(ListFilter{Q: "pricing"}); n != 2 {
+		t.Errorf("a search ignores case: %d", n)
+	}
+	if n := find(ListFilter{Q: "PRICING for 40"}); n != 1 {
+		t.Errorf("a phrase: %d", n)
+	}
+	if n := find(ListFilter{Q: "%"}); n != 1 {
+		t.Errorf("a percent sign is a character, not a wildcard: %d", n)
+	}
+	if n := find(ListFilter{Q: "_"}); n != 1 {
+		t.Errorf("an underscore is a character, not a wildcard: %d", n)
+	}
+	if n := find(ListFilter{Q: `\`}); n != 0 {
+		t.Errorf("a backslash is a character: %d", n)
+	}
+	if n := find(ListFilter{Q: "nothing like this"}); n != 0 {
+		t.Errorf("no match: %d", n)
+	}
+	if n := find(ListFilter{KeyID: &e.key.ID}); n != 3 {
+		t.Errorf("one key's runs: %d", n)
+	}
+	if n := find(ListFilter{KeyID: &k2, Q: "pricing"}); n != 1 {
+		t.Errorf("key and search together: %d", n)
+	}
+	_ = a
+}
+
+func newEnvKey(t *testing.T, e *env, name string) uuid.UUID {
+	t.Helper()
+	var id uuid.UUID
+	if err := e.pool.QueryRow(context.Background(), `INSERT INTO api_keys (id, name, key_prefix, key_hash) VALUES (gen_random_uuid(), $1, 'spw_xxxx', decode(md5($1),'hex')) RETURNING id`, name).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}

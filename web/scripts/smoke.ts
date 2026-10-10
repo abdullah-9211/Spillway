@@ -90,7 +90,17 @@ for (const [label, who, role] of [["admin", admin, "admin"], ["viewer", viewer, 
 
   const runsHome = await fetch(base + "/", { headers: { cookie } });
   const runsHtml = await runsHome.text();
-  check(`${label} sees the Runs page with its counters`, runsHome.status === 200 && runsHtml.includes("Running now") && runsHtml.includes("Succeeded") && runsHtml.includes("Time range"), `status ${runsHome.status}`);
+  check(`${label} sees the Runs page with its counters`, runsHome.status === 200 && runsHtml.includes("Search runs by task") && runsHtml.includes("Succeeded") && runsHtml.includes("Time range") && runsHtml.includes("New run"), `status ${runsHome.status}`);
+  const newRunDisabled = /<button[^>]*disabled[^>]*>New run</.test(runsHtml);
+  check(label === "admin" ? "admin can start a run from the page" : "viewer's New run is disabled", label === "admin" ? !newRunDisabled : newRunDisabled);
+  const started = await fetch(base + "/api/runs", { method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify({ input: "smoke " + Date.now() }) });
+  if (label === "viewer") check("viewer cannot start a run (403)", started.status === 403, `status ${started.status}`);
+  else {
+    const made = (await started.json()) as { id?: string };
+    check("admin starts a run from the dashboard", started.status === 202 && !!made.id, `status ${started.status}`);
+    const cancelled = await fetch(base + `/api/runs/${made.id}/cancel`, { method: "POST", headers: { cookie } });
+    check("admin cancels it", cancelled.status === 202 || cancelled.status === 409, `status ${cancelled.status}`);
+  }
   const runsWeek = await fetch(base + "/?hours=168", { headers: { cookie } });
   check(`${label} can pick the 7 day range`, runsWeek.status === 200 && (await runsWeek.text()).includes("Activity in the last 7 days"));
   const snapRes = await fetch(base + "/api/runs/snapshot?hours=24", { headers: { cookie } });

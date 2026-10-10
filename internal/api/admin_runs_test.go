@@ -84,6 +84,7 @@ func newRunsAdminRig(t *testing.T) (*adminRig, *fakeRunsAdmin) {
 	r := newAdminRig(t)
 	f := sampleRuns()
 	r.admin.d.Runs = f
+	r.admin.d.RunStarter = &fakeStarter{}
 	r.admin.d.Now = func() time.Time { return runsNow }
 	r.admin.registerRuns()
 	return r, f
@@ -203,5 +204,91 @@ func TestRunsEndpointsNeedASessionAndHideErrors(t *testing.T) {
 		if resp.StatusCode != 500 || strings.Contains(fmt.Sprint(body), "password") {
 			t.Errorf("%s: %d %v (internal errors must not leak)", p, resp.StatusCode, body)
 		}
+	}
+}
+
+type fakeStarter struct {
+	created []runs.Request
+	raw     []byte
+	err     error
+	cancel  error
+}
+
+func (f *fakeStarter) Create(_ context.Context, req runs.Request, raw []byte) (runs.Run, error) {
+	if f.err != nil {
+		return runs.Run{}, f.err
+	}
+	f.created, f.raw = append(f.created, req), raw
+	return runs.Run{ID: uuid.MustParse("00000000-0000-7000-8000-0000000000aa"), Status: runs.Queued}, nil
+}
+
+func (f *fakeStarter) CancelAny(_ context.Context, id uuid.UUID, _ time.Time) (runs.Run, error) {
+	if f.cancel != nil {
+		return runs.Run{}, f.cancel
+	}
+	return runs.Run{ID: id, Status: runs.Running, CancelRequested: true}, nil
+}
+
+func TestStartAndCancelARunFromTheDashboard(t *testing.T) {
+	r, _ := newRunsAdminRig(t)
+	fs := r.admin.d.RunStarter.(*fakeStarter)
+	admin, viewer := r.token(t, "admin", "admin-password"), r.token(t, "viewer", "viewer-password")
+
+	code, body := r.json(t, "POST", "/admin/runs", admin, `{"input":"Summarise the incident","model":"mini","limits":{"max_steps":5}}`)
+	if code != 202 || body["status"] != "queued" || body["id"] != "00000000-0000-7000-8000-0000000000aa" {
+		t.Fatalf("%d %v", code, body)
+	}
+	if len(fs.created) != 1 || fs.created[0].Input.Text != "Summarise the incident" || fs.created[0].ModelName() != "mini" || *fs.created[0].Limits.MaxSteps != 5 || !strings.Contains(string(fs.raw), "incident") {
+		t.Errorf("starter saw %+v", fs.created)
+	}
+	if code, body := r.json(t, "POST", "/admin/runs", viewer, `{"input":"x"}`); code != 403 || len(fs.created) != 1 {
+		t.Errorf("a viewer cannot start runs: %d %v", code, body)
+	}
+	for _, bad := range []string{`{`, `{"input":"x","surprise":1}`, ``} {
+		if code, _ := r.json(t, "POST", "/admin/runs", admin, bad); code != 400 {
+			t.Errorf("%q: %d", bad, code)
+		}
+	}
+	fs.err = &runs.Validation{Param: "model", Message: `unknown model or policy "nope"`}
+	if code, body := r.json(t, "POST", "/admin/runs", admin, `{"input":"x","model":"nope"}`); code != 400 || !strings.Contains(fmt.Sprint(body), "unknown model") {
+		t.Errorf("validation: %d %v", code, body)
+	}
+	fs.err = fmt.Errorf("pq: connection refused")
+	if code, body := r.json(t, "POST", "/admin/runs", admin, `{"input":"x"}`); code != 500 || strings.Contains(fmt.Sprint(body), "pq") {
+		t.Errorf("internal errors do not leak: %d %v", code, body)
+	}
+
+	id := uuid.NewString()
+	if code, body := r.json(t, "POST", "/admin/runs/"+id+"/cancel", admin, ""); code != 202 || body["cancel_requested"] != true {
+		t.Errorf("cancel: %d %v", code, body)
+	}
+	if code, _ := r.json(t, "POST", "/admin/runs/"+id+"/cancel", viewer, ""); code != 403 {
+		t.Errorf("a viewer cannot cancel: %d", code)
+	}
+	fs.cancel = runs.ErrFinished
+	if code, body := r.json(t, "POST", "/admin/runs/"+id+"/cancel", admin, ""); code != 409 || body["error"].(map[string]any)["code"] != "run_finished" {
+		t.Errorf("finished: %d %v", code, body)
+	}
+	fs.cancel = runs.ErrNotFound
+	if code, _ := r.json(t, "POST", "/admin/runs/"+id+"/cancel", admin, ""); code != 404 {
+		t.Errorf("unknown: %d", code)
+	}
+	if code, _ := r.json(t, "POST", "/admin/runs/not-a-uuid/cancel", admin, ""); code != 404 {
+		t.Errorf("bad id: %d", code)
+	}
+}
+
+func TestRunListSearchAndKeyFilterAreValidatedAndPassedDown(t *testing.T) {
+	r, f := newRunsAdminRig(t)
+	tok := r.token(t, "viewer", "viewer-password")
+	key := uuid.New()
+	if code, _ := r.json(t, "GET", "/admin/runs?q=%20pricing%20&key_id="+key.String(), tok, ""); code != 200 || f.last.Q != "pricing" || f.last.KeyID == nil || *f.last.KeyID != key {
+		t.Errorf("filters passed down: %+v", f.last)
+	}
+	if code, _ := r.json(t, "GET", "/admin/runs?key_id=nope", tok, ""); code != 400 {
+		t.Errorf("bad key id: %d", code)
+	}
+	if code, _ := r.json(t, "GET", "/admin/runs?q="+strings.Repeat("x", 101), tok, ""); code != 400 {
+		t.Errorf("long search: %d", code)
 	}
 }

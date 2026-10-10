@@ -174,6 +174,9 @@ type ListFilter struct {
 	Since  time.Time
 	Limit  int
 	Before *Cursor
+	// Q matches runs whose task contains this text, ignoring case. KeyName narrows to one API key.
+	Q     string
+	KeyID *uuid.UUID
 }
 
 type Cursor struct {
@@ -197,7 +200,9 @@ func (rd *Reader) List(ctx context.Context, f ListFilter) ([]Item, error) {
 		WHERE ($1::text = '' OR ($1 = 'active' AND r.status NOT IN ('succeeded','failed','cancelled')) OR ($1 = 'finished' AND r.status IN ('succeeded','failed','cancelled') AND r.finished_at >= $2))
 		  AND ($3::text IS NULL OR r.status = $3)
 		  AND ($4::timestamptz IS NULL OR (r.created_at, r.id) < ($4::timestamptz, $5::uuid))
-		ORDER BY r.created_at DESC, r.id DESC LIMIT $6`, f.State, f.Since, status, before, beforeID, f.Limit)
+		  AND ($7::text = '' OR (r.request->>'input') ILIKE '%' || $7 || '%' ESCAPE '\')
+		  AND ($8::uuid IS NULL OR r.api_key_id = $8)
+		ORDER BY r.created_at DESC, r.id DESC LIMIT $6`, f.State, f.Since, status, before, beforeID, f.Limit, likeEscape(f.Q), f.KeyID)
 	if err != nil {
 		return nil, err
 	}
@@ -375,4 +380,9 @@ func DecodeCursor(s string) (Cursor, error) {
 		return Cursor{}, ErrBadCursor
 	}
 	return Cursor{At: t, ID: u}, nil
+}
+
+// likeEscape makes text safe to put between % signs in an ILIKE ... ESCAPE '\' pattern.
+func likeEscape(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }

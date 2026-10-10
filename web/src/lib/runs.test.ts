@@ -147,3 +147,104 @@ describe("live updates", () => {
     expect(next.snap.nextCursor).toBeNull();
   });
 });
+
+import {
+  emptyNewRun, groupByDay, isFiltered, newRunBody, noFilters, parseFilters, showsActive, showsFinished, snapshotQuery, sortRuns, statusChips, validateNewRun,
+  viewQuery, visibleActive, visibleFinished,
+} from "./runs";
+
+describe("filters", () => {
+  it("reads them from an address and ignores what it does not know", () => {
+    expect(parseFilters({ q: "  pricing ", status: "failed", key: "01a121cc-ee68-74de-8171-8af2ee9ad8ff", sort: "longest" })).toEqual({ q: "pricing", status: "failed", key: "01a121cc-ee68-74de-8171-8af2ee9ad8ff", sort: "longest" });
+    expect(parseFilters({ status: "weird", key: "not-a-uuid", sort: "sideways" })).toEqual(noFilters);
+    expect(parseFilters(new URLSearchParams("status=needs&q=a"))).toEqual({ q: "a", status: "needs", key: "", sort: "newest" });
+    expect(parseFilters({ q: "x".repeat(300) }).q).toHaveLength(100);
+    expect(parseFilters({ status: ["cancelled", "failed"] }).status).toBe("cancelled");
+  });
+  it("knows when a view is narrowed", () => {
+    expect(isFiltered(noFilters)).toBe(false);
+    expect([{ q: "a" }, { status: "failed" }, { key: "k" }].map((o) => isFiltered({ ...noFilters, ...o } as never))).toEqual([true, true, true]);
+    expect(isFiltered({ ...noFilters, sort: "longest" })).toBe(false); // an order is not a filter
+  });
+  it("puts only what differs in the address", () => {
+    expect(viewQuery(24, noFilters)).toBe("");
+    expect(viewQuery(168, { q: "a b", status: "failed", key: "", sort: "costliest" })).toBe("?hours=168&q=a+b&status=failed&sort=costliest");
+  });
+  it("asks the service for what it can filter, and leaves the status of live runs to the screen", () => {
+    expect(snapshotQuery(24, noFilters)).toBe("hours=24");
+    expect(snapshotQuery(1, { q: "x", status: "failed", key: "kid", sort: "newest" })).toBe("hours=1&q=x&key=kid&status=failed");
+    expect(snapshotQuery(24, { ...noFilters, status: "active" })).toBe("hours=24");
+  });
+  it("says which list a status shows", () => {
+    expect((["all", "active", "needs", "succeeded", "failed", "cancelled"] as const).map((s) => [showsActive(s), showsFinished(s)])).toEqual([
+      [true, true], [true, false], [true, false], [false, true], [false, true], [false, true],
+    ]);
+  });
+  it("makes a chip per status with its count", () => {
+    const chips = statusChips({ running: 4, sleeping: 2, needs_you: 1, succeeded: 9, failed: 3, cancelled: 0 });
+    expect(chips.map((c) => [c.id, c.count])).toEqual([["all", null], ["active", 6], ["needs", 1], ["succeeded", 9], ["failed", 3], ["cancelled", 0]]);
+  });
+});
+
+describe("sorting and grouping", () => {
+  const r = (id: string, over: Partial<RunItem>) => run(id, over);
+  const list = [r("a", { duration_ms: 1000, cost_usd: "0.5", step_count: 2 }), r("b", { duration_ms: 9000, cost_usd: "0.1", step_count: 9 }), r("c", { duration_ms: 5000, cost_usd: "0.9", step_count: 2 })];
+  it("orders by what was asked, keeping ties in their given order", () => {
+    expect(sortRuns(list, "newest").map((x) => x.id)).toEqual(["a", "b", "c"]);
+    expect(sortRuns(list, "longest").map((x) => x.id)).toEqual(["b", "c", "a"]);
+    expect(sortRuns(list, "costliest").map((x) => x.id)).toEqual(["c", "a", "b"]);
+    expect(sortRuns(list, "steps").map((x) => x.id)).toEqual(["b", "a", "c"]);
+    expect(list.map((x) => x.id)).toEqual(["a", "b", "c"]); // the input is not changed
+  });
+  it("groups under Today, Yesterday and the date, in order", () => {
+    const now = new Date(2026, 9, 9, 15, 0, 0);
+    const at = (d: Date) => d.toISOString();
+    const g = groupByDay([
+      r("1", { finished_at: at(new Date(2026, 9, 9, 14, 0)) }), r("2", { finished_at: at(new Date(2026, 9, 9, 9, 0)) }),
+      r("3", { finished_at: at(new Date(2026, 9, 8, 22, 0)) }), r("4", { finished_at: at(new Date(2026, 9, 5, 10, 0)) }),
+    ], now);
+    expect(g.map((x) => [x.label.split(" ")[0], x.runs.map((y) => y.id)])).toEqual([["Today", ["1", "2"]], ["Yesterday", ["3"]], ["Mon", ["4"]]]);
+    expect(groupByDay([], now)).toEqual([]);
+  });
+});
+
+describe("what is shown", () => {
+  const s = snap({
+    active: [run("r1", { status: "running" }), run("w1", { status: "waiting_human" })],
+    finished: [run("ok", { status: "succeeded" }), run("bad", { status: "failed" }), run("x", { status: "cancelled" })],
+  });
+  it("shows live runs apart from the ones waiting for a person, and only the status asked for", () => {
+    const f = (status: Filters["status"]) => ({ ...noFilters, status });
+    expect(visibleActive(s, f("all")).running.map((x) => x.id)).toEqual(["r1"]);
+    expect(visibleActive(s, f("all")).waiting.map((x) => x.id)).toEqual(["w1"]);
+    expect(visibleActive(s, f("needs")).running).toEqual([]);
+    expect(visibleActive(s, f("failed"))).toEqual({ running: [], waiting: [] });
+    expect(visibleFinished(s, f("all")).map((x) => x.id)).toEqual(["ok", "bad", "x"]);
+    expect(visibleFinished(s, f("failed")).map((x) => x.id)).toEqual(["bad"]);
+    expect(visibleFinished(s, f("active"))).toEqual([]);
+  });
+});
+
+import type { Filters } from "./runs";
+
+describe("starting a run", () => {
+  it("needs a task and sane limits", () => {
+    expect(validateNewRun(emptyNewRun).task).toBeTruthy();
+    expect(validateNewRun({ ...emptyNewRun, task: "x".repeat(9000) }).task).toBeTruthy();
+    const f = { ...emptyNewRun, task: "do it" };
+    expect(validateNewRun(f)).toEqual({});
+    expect(validateNewRun({ ...f, maxSteps: "0" }).maxSteps).toBeTruthy();
+    expect(validateNewRun({ ...f, maxSteps: "2.5" }).maxSteps).toBeTruthy();
+    expect(validateNewRun({ ...f, maxSteps: "20" })).toEqual({});
+    expect(validateNewRun({ ...f, maxCost: "-1" }).maxCost).toBeTruthy();
+    expect(validateNewRun({ ...f, maxCost: "abc" }).maxCost).toBeTruthy();
+    expect(validateNewRun({ ...f, deadlineMinutes: "0" }).deadlineMinutes).toBeTruthy();
+    expect(validateNewRun({ ...f, deadlineMinutes: "2000" }).deadlineMinutes).toBeTruthy();
+  });
+  it("sends only what was set, with the deadline in seconds", () => {
+    expect(newRunBody({ ...emptyNewRun, task: "  hi  " })).toEqual({ input: "hi" });
+    expect(newRunBody({ task: "hi", model: "cheap-fast", system: " be brief ", maxSteps: "5", maxCost: "0.25", deadlineMinutes: "1.5" })).toEqual({
+      input: "hi", model: "cheap-fast", system: "be brief", limits: { max_steps: 5, max_cost_usd: 0.25, deadline_seconds: 90 },
+    });
+  });
+});

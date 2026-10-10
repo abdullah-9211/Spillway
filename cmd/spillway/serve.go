@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/abdullah-9211/spillway/internal/api"
 	"github.com/abdullah-9211/spillway/internal/auth"
 	"github.com/abdullah-9211/spillway/internal/db"
@@ -169,7 +171,9 @@ func serve(ctx context.Context, args []string, getenv func(string) string, errOu
 				}
 				pg_ := playground.NewService(gw, func(context.Context) (keys.Key, error) { return pkey, nil }, playground.NewStore(pg.Pool), cat.Playground.FaultInjection, log)
 				admin = api.NewAdmin(api.AdminDeps{Users: auth.NewUsers(pg.Pool, auth.DefaultParams), Keys: keyStore, Usage: usage.NewReader(pg.Pool), Health: gw.ProviderHealth, Latency: metrics,
-					Runs:       runs.NewReader(pg.Pool),
+					Runs: runs.NewReader(pg.Pool),
+					RunStarter: starter{c: &runs.Creator{Store: runStore, Key: func(context.Context) (keys.Key, error) { return pkey, nil },
+						Caps: runs.Caps{MaxSteps: cat.Runs.MaxSteps, MaxCost: cat.Runs.MaxCost, Deadline: cat.Runs.Deadline}, Known: cat.Has}, s: runStore},
 					Playground: &api.PlaygroundDeps{Service: pg_, Catalog: gw.Catalog, Key: func(ctx context.Context, now time.Time) (keys.Stats, error) { return keyStore.Stats(ctx, pkey.ID, now) }},
 					Signer:     signer, Deps: deps, Log: log})
 			}
@@ -224,4 +228,18 @@ func serve(ctx context.Context, args []string, getenv func(string) string, errOu
 		log.Info("usage flushed", "written", writer.Written(), "dropped", writer.Dropped())
 	}
 	return errors.Join(errs...)
+}
+
+// starter lets the admin API start runs (under the playground key) and cancel any run.
+type starter struct {
+	c *runs.Creator
+	s *runs.Store
+}
+
+func (s starter) Create(ctx context.Context, req runs.Request, raw []byte) (runs.Run, error) {
+	return s.c.Create(ctx, req, raw)
+}
+
+func (s starter) CancelAny(ctx context.Context, id uuid.UUID, now time.Time) (runs.Run, error) {
+	return s.s.CancelAny(ctx, id, now)
 }

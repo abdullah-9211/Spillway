@@ -27,42 +27,45 @@ export function RunTag({ run, now }: { run: Pick<RunItem, "status" | "wake_at">;
   );
 }
 
-export function RunCard({ run, now, fresh }: { run: RunItem; now: Date; fresh: boolean }) {
+type Pick1 = { selected: boolean; onSelect: () => void; onOpen: () => void };
+
+/** A run in progress, as a card. Click selects it (its details open beside the list); double-click opens the run. */
+export function RunCard({ run, now, fresh, selected, onSelect, onOpen }: { run: RunItem; now: Date; fresh: boolean } & Pick1) {
   return (
-    <Link className={`panel rc ${fresh ? "fresh" : ""}`.trim()} href={`/runs/${run.id}`}>
-      <div className="top">
+    <button type="button" className={`panel rc ${fresh ? "fresh" : ""} ${selected ? "sel" : ""}`.trim()} aria-pressed={selected} onClick={onSelect} onDoubleClick={onOpen}>
+      <span className="top">
         <RunTag run={run} now={now} />
         <span>{run.key}</span>
-      </div>
-      <div className="g">{run.goal}</div>
+      </span>
+      <span className="g">{run.goal}</span>
       <StepStrip strip={run.strip} />
-      <div className="ft num">
+      <span className="ft num">
         <span>{run.step_count === 0 ? "Not started" : `Step ${run.step_count}`}</span>
         <span>{runCost(run.cost_usd)}</span>
         <span>{runDuration(run, now)}</span>
-      </div>
-    </Link>
+      </span>
+    </button>
   );
 }
 
-export function RunRow({ run, now, tone }: { run: RunItem; now: Date; tone: "fresh" | "ended" | "" }) {
+export function RunRow({ run, now, tone, selected, onSelect, onOpen }: { run: RunItem; now: Date; tone: "fresh" | "ended" | "" } & Pick1) {
   const v = statusView(run, now);
   const why = run.status === "succeeded" ? "" : reasonLabel(run.failure_reason) || v.word;
   return (
     <div role="listitem">
-      <Link className={`lr ${tone}`.trim()} href={`/runs/${run.id}`}>
-      <span className={`sti ${v.tone}`} role="img" aria-label={v.word}>
-        <svg width="16" height="16" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-          <path d={v.icon} />
-        </svg>
-      </span>
-      <span className="goal">{run.goal}</span>
-      <span className="why">{why}</span>
-      <StepStrip strip={run.strip} />
-      <span className="right-t num">{runCost(run.cost_usd)}</span>
-      <span className="right-t num">{runDuration(run, now)}</span>
-      <span className="right-t">{agoLabel(run.finished_at ?? run.created_at, now)}</span>
-      </Link>
+      <button type="button" className={`lr ${tone} ${selected ? "sel" : ""}`.trim()} aria-pressed={selected} onClick={onSelect} onDoubleClick={onOpen}>
+        <span className={`sti ${v.tone}`} role="img" aria-label={v.word}>
+          <svg width="16" height="16" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d={v.icon} />
+          </svg>
+        </span>
+        <span className="goal">{run.goal}</span>
+        <span className="why">{why}</span>
+        <StepStrip strip={run.strip} />
+        <span className="right-t num">{runCost(run.cost_usd)}</span>
+        <span className="right-t num">{runDuration(run, now)}</span>
+        <span className="right-t">{agoLabel(run.finished_at ?? run.created_at, now)}</span>
+      </button>
     </div>
   );
 }

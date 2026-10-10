@@ -267,7 +267,11 @@ export interface paths {
         /** Runs, newest first, each with a strip of its latest steps */
         get: operations["runsList"];
         put?: never;
-        post?: never;
+        /**
+         * Start a run from the dashboard
+         * @description The run is made under the built-in playground key and charged to it. Tools are not available from the dashboard yet.
+         */
+        post: operations["runsCreate"];
         delete?: never;
         options?: never;
         head?: never;
@@ -285,6 +289,26 @@ export interface paths {
         get: operations["runGet"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/runs/{id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cancel a run
+         * @description A run nobody is working on is cancelled at once; a run a worker holds is cancelled within a heartbeat.
+         */
+        post: operations["runCancel"];
         delete?: never;
         options?: never;
         head?: never;
@@ -673,6 +697,18 @@ export interface components {
             wake_at: string | null;
             failure_reason: string | null;
             strip: components["schemas"]["Strip"];
+        };
+        RunStart: {
+            input: string;
+            system?: string;
+            /** @description A policy name or model id; default is the default policy */
+            model?: string;
+            limits?: {
+                max_steps?: number;
+                max_cost_usd?: number;
+                deadline_seconds?: number;
+            };
+            metadata?: Record<string, never>;
         };
     };
     responses: {
@@ -1232,6 +1268,10 @@ export interface operations {
                 state?: "active" | "finished";
                 status?: "queued" | "running" | "waiting_tool" | "waiting_human" | "sleeping" | "succeeded" | "failed" | "cancelled";
                 hours?: 1 | 24 | 168;
+                /** @description Only runs whose task contains this text (ignoring case) */
+                q?: string;
+                /** @description Only runs of this API key */
+                key_id?: string;
                 limit?: number;
                 cursor?: string;
             };
@@ -1257,6 +1297,37 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
         };
     };
+    runsCreate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RunStart"];
+            };
+        };
+        responses: {
+            /** @description Queued */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** Format: uuid */
+                        id: string;
+                        status: string;
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
     runGet: {
         parameters: {
             query?: never;
@@ -1279,6 +1350,45 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
+        };
+    };
+    runCancel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Cancelled, or asked to cancel */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** Format: uuid */
+                        id: string;
+                        status: string;
+                        cancel_requested: boolean;
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description The run already finished */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
         };
     };
 }

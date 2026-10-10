@@ -387,6 +387,8 @@ paths:
         - { name: state, in: query, required: false, description: "active is every run not finished; finished is runs that ended inside `hours`", schema: { type: string, enum: [active, finished] } }
         - { name: status, in: query, required: false, schema: { type: string, enum: [queued, running, waiting_tool, waiting_human, sleeping, succeeded, failed, cancelled] } }
         - { name: hours, in: query, required: false, schema: { type: integer, enum: [1, 24, 168], default: 24 } }
+        - { name: q, in: query, required: false, description: Only runs whose task contains this text (ignoring case), schema: { type: string, maxLength: 100 } }
+        - { name: key_id, in: query, required: false, description: Only runs of this API key, schema: { type: string, format: uuid } }
         - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
         - { name: cursor, in: query, required: false, schema: { type: string } }
       responses:
@@ -404,6 +406,31 @@ paths:
                   next_cursor: { type: string, nullable: true }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      operationId: runsCreate
+      summary: Start a run from the dashboard
+      description: The run is made under the built-in playground key and charged to it. Tools are not available from the dashboard yet.
+      x-access: admin
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RunStart" }
+      responses:
+        "202":
+          description: Queued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, status]
+                properties:
+                  id: { type: string, format: uuid }
+                  status: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /admin/runs/{id}:
     get:
       operationId: runGet
@@ -420,6 +447,35 @@ paths:
               schema: { $ref: "#/components/schemas/RunItem" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /admin/runs/{id}/cancel:
+    post:
+      operationId: runCancel
+      summary: Cancel a run
+      description: A run nobody is working on is cancelled at once; a run a worker holds is cancelled within a heartbeat.
+      x-access: admin
+      security: [{ bearer: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "202":
+          description: Cancelled, or asked to cancel
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, status, cancel_requested]
+                properties:
+                  id: { type: string, format: uuid }
+                  status: { type: string }
+                  cancel_requested: { type: boolean }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The run already finished
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 components:
   parameters:
     From:
@@ -839,3 +895,19 @@ components:
         wake_at: { type: string, format: date-time, nullable: true }
         failure_reason: { type: string, nullable: true }
         strip: { $ref: "#/components/schemas/Strip" }
+    RunStart:
+      type: object
+      required: [input]
+      additionalProperties: false
+      properties:
+        input: { type: string }
+        system: { type: string }
+        model: { type: string, description: A policy name or model id; default is the default policy }
+        limits:
+          type: object
+          additionalProperties: false
+          properties:
+            max_steps: { type: integer, minimum: 1 }
+            max_cost_usd: { type: number }
+            deadline_seconds: { type: integer, minimum: 1 }
+        metadata: { type: object }

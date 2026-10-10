@@ -356,6 +356,15 @@ func (g *pgLog) Append(ctx context.Context, ns NewStep) (Step, error) {
 // an expired lease) is cancelled on the spot. A run a live worker holds gets a cancel request, which the worker sees
 // within a heartbeat and acts on at once; the worker writes the final row. Cancelling twice is harmless.
 func (s *Store) RequestCancel(ctx context.Context, id, key uuid.UUID, now time.Time) (Run, error) {
+	return s.requestCancel(ctx, id, &key, now)
+}
+
+// CancelAny is RequestCancel for an admin of the dashboard, who may cancel any run, not only their own key's.
+func (s *Store) CancelAny(ctx context.Context, id uuid.UUID, now time.Time) (Run, error) {
+	return s.requestCancel(ctx, id, nil, now)
+}
+
+func (s *Store) requestCancel(ctx context.Context, id uuid.UUID, key *uuid.UUID, now time.Time) (Run, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Run{}, err
@@ -368,7 +377,7 @@ func (s *Store) RequestCancel(ctx context.Context, id, key uuid.UUID, now time.T
 	var epoch int64
 	var keyID uuid.UUID
 	err = tx.QueryRow(ctx, `SELECT status, COALESCE(lease_owner,''), lease_expires_at, lease_epoch, api_key_id FROM runs WHERE id=$1 FOR UPDATE`, id).Scan(&status, &owner, &expires, &epoch, &keyID)
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && keyID != key) {
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && key != nil && keyID != *key) {
 		return Run{}, ErrNotFound
 	}
 	if err != nil {

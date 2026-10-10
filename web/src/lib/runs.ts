@@ -230,3 +230,176 @@ export function appendFinished(prev: Live, more: RunItem[], nextCursor: string |
   const have = new Set(prev.snap.finished.map((r) => r.id));
   return { ...prev, fresh: new Set(), ended: new Set(), snap: { ...prev.snap, finished: [...prev.snap.finished, ...more.filter((r) => !have.has(r.id))], nextCursor } };
 }
+
+// --- filters, sorting and grouping ---
+
+export type StatusFilter = "all" | "active" | "needs" | "succeeded" | "failed" | "cancelled";
+export type SortKey = "newest" | "longest" | "costliest" | "steps";
+
+export type Filters = { q: string; status: StatusFilter; key: string; sort: SortKey };
+export const noFilters: Filters = { q: "", status: "all", key: "", sort: "newest" };
+
+export const SORTS: { value: SortKey; label: string }[] = [
+  { value: "newest", label: "Newest first" },
+  { value: "longest", label: "Longest first" },
+  { value: "costliest", label: "Most expensive first" },
+  { value: "steps", label: "Most steps first" },
+];
+
+const STATUSES: StatusFilter[] = ["all", "active", "needs", "succeeded", "failed", "cancelled"];
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const MAX_SEARCH = 100;
+
+type Params = Record<string, string | string[] | undefined> | URLSearchParams;
+const get = (p: Params, k: string): string => {
+  const v = p instanceof URLSearchParams ? p.get(k) : p[k];
+  return (Array.isArray(v) ? v[0] : v) ?? "";
+};
+
+/** Filters from a page address or a request: anything unknown falls back to no filter, so a bad link still opens. */
+export function parseFilters(p: Params): Filters {
+  const status = get(p, "status") as StatusFilter;
+  const sort = get(p, "sort") as SortKey;
+  const key = get(p, "key");
+  return {
+    q: get(p, "q").trim().slice(0, MAX_SEARCH),
+    status: STATUSES.includes(status) ? status : "all",
+    key: UUID.test(key) ? key : "",
+    sort: SORTS.some((s) => s.value === sort) ? sort : "newest",
+  };
+}
+
+export const isFiltered = (f: Filters) => f.q !== "" || f.status !== "all" || f.key !== "";
+
+/** The address for a view: only what differs from the defaults, so the plain page keeps its plain address. */
+export function viewQuery(hours: Hours, f: Filters): string {
+  const q = new URLSearchParams();
+  if (hours !== 24) q.set("hours", String(hours));
+  if (f.q) q.set("q", f.q);
+  if (f.status !== "all") q.set("status", f.status);
+  if (f.key) q.set("key", f.key);
+  if (f.sort !== "newest") q.set("sort", f.sort);
+  const s = q.toString();
+  return s ? `?${s}` : "";
+}
+
+/** What the Go service is asked for. Needs-you and Running are lists of live runs, so they ask for no finished ones. */
+export function snapshotQuery(hours: Hours, f: Filters): string {
+  const q = new URLSearchParams({ hours: String(hours) });
+  if (f.q) q.set("q", f.q);
+  if (f.key) q.set("key", f.key);
+  if (f.status === "succeeded" || f.status === "failed" || f.status === "cancelled") q.set("status", f.status);
+  return q.toString();
+}
+
+/** Which of the two lists a status choice shows. */
+export function showsActive(s: StatusFilter) {
+  return s === "all" || s === "active" || s === "needs";
+}
+export function showsFinished(s: StatusFilter) {
+  return s === "all" || s === "succeeded" || s === "failed" || s === "cancelled";
+}
+
+export type Chip = { id: StatusFilter; label: string; count: number | null };
+
+export function statusChips(c: RunCounts): Chip[] {
+  return [
+    { id: "all", label: "All", count: null },
+    { id: "active", label: "Running", count: c.running + c.sleeping },
+    { id: "needs", label: "Needs you", count: c.needs_you },
+    { id: "succeeded", label: "Succeeded", count: c.succeeded },
+    { id: "failed", label: "Failed", count: c.failed },
+    { id: "cancelled", label: "Cancelled", count: c.cancelled },
+  ];
+}
+
+/** Sorts a copy. Ties keep the order they came in, which is newest first. */
+export function sortRuns(runs: RunItem[], sort: SortKey): RunItem[] {
+  const by: Record<SortKey, (a: RunItem, b: RunItem) => number> = {
+    newest: () => 0,
+    longest: (a, b) => b.duration_ms - a.duration_ms,
+    costliest: (a, b) => Number(b.cost_usd) - Number(a.cost_usd),
+    steps: (a, b) => b.step_count - a.step_count,
+  };
+  return runs.map((r, i) => [r, i] as const).sort((x, y) => by[sort](x[0], y[0]) || x[1] - y[1]).map(([r]) => r);
+}
+
+export type Group = { label: string; runs: RunItem[] };
+
+const dayKey = (d: Date) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+
+/** Runs under a heading per day (Today, Yesterday, then the date), in the order given. */
+export function groupByDay(runs: RunItem[], now: Date = new Date()): Group[] {
+  const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  const out: Group[] = [];
+  const index = new Map<string, Group>();
+  for (const r of runs) {
+    const d = new Date(r.finished_at ?? r.created_at);
+    const k = dayKey(d);
+    let g = index.get(k);
+    if (!g) {
+      const label = k === dayKey(now) ? "Today" : k === dayKey(yesterday) ? "Yesterday" : d.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
+      g = { label, runs: [] };
+      index.set(k, g);
+      out.push(g);
+    }
+    g.runs.push(r);
+  }
+  return out;
+}
+
+/** The finished runs to show: those the status filter keeps, in the chosen order. */
+export function visibleFinished(snap: Snapshot, f: Filters): RunItem[] {
+  if (!showsFinished(f.status)) return [];
+  const kept = f.status === "all" ? snap.finished : snap.finished.filter((r) => r.status === f.status);
+  return sortRuns(kept, f.sort);
+}
+
+/** The live runs to show, leaving out the ones the Needs you card already lists. */
+export function visibleActive(snap: Snapshot, f: Filters): { running: RunItem[]; waiting: RunItem[] } {
+  if (!showsActive(f.status)) return { running: [], waiting: [] };
+  const needsOnly = f.status === "needs";
+  const running = needsOnly ? [] : sortRuns(snap.active.filter((r) => r.status !== "waiting_human"), f.sort);
+  return { running, waiting: snap.active.filter((r) => r.status === "waiting_human") };
+}
+
+// --- starting a run ---
+
+export type NewRunForm = { task: string; model: string; system: string; maxSteps: string; maxCost: string; deadlineMinutes: string };
+export const emptyNewRun: NewRunForm = { task: "", model: "default", system: "", maxSteps: "", maxCost: "", deadlineMinutes: "" };
+export const MAX_TASK = 8000;
+export const TASK_IDEAS = ["Summarise the open incidents and who owns them", "Draft three release-note bullets from the last week of changes", "List the risks in this plan and rank them"];
+
+export type NewRunErrors = Partial<Record<keyof NewRunForm, string>>;
+
+export function validateNewRun(f: NewRunForm): NewRunErrors {
+  const e: NewRunErrors = {};
+  if (!f.task.trim()) e.task = "Say what the run should do.";
+  else if (f.task.length > MAX_TASK) e.task = `Keep the task under ${MAX_TASK.toLocaleString("en-US")} characters.`;
+  if (f.maxSteps.trim() !== "") {
+    const n = Number(f.maxSteps);
+    if (!Number.isInteger(n) || n < 1 || n > 1000) e.maxSteps = "A whole number from 1 to 1,000.";
+  }
+  if (f.maxCost.trim() !== "") {
+    const n = Number(f.maxCost);
+    if (!Number.isFinite(n) || n <= 0 || n > 1000) e.maxCost = "A dollar amount above 0, up to 1,000.";
+  }
+  if (f.deadlineMinutes.trim() !== "") {
+    const n = Number(f.deadlineMinutes);
+    if (!Number.isFinite(n) || n <= 0 || n > 1440) e.deadlineMinutes = "Minutes, above 0 and up to 1,440 (a day).";
+  }
+  return e;
+}
+
+/** The request body. Limits are sent only when set; the service caps them either way. */
+export function newRunBody(f: NewRunForm) {
+  const body: Record<string, unknown> = { input: f.task.trim() };
+  if (f.model && f.model !== "default") body.model = f.model;
+  if (f.system.trim()) body.system = f.system.trim();
+  const limits: Record<string, number> = {};
+  if (f.maxSteps.trim()) limits.max_steps = Number(f.maxSteps);
+  if (f.maxCost.trim()) limits.max_cost_usd = Number(f.maxCost);
+  if (f.deadlineMinutes.trim()) limits.deadline_seconds = Math.round(Number(f.deadlineMinutes) * 60);
+  if (Object.keys(limits).length) body.limits = limits;
+  return body;
+}

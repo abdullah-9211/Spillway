@@ -1,10 +1,14 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,7 +25,17 @@ type RunsAdmin interface {
 	Get(ctx context.Context, id uuid.UUID) (runs.Item, error)
 }
 
+// RunStarter starts and cancels runs for an admin of the dashboard.
+type RunStarter interface {
+	Create(ctx context.Context, req runs.Request, raw []byte) (runs.Run, error)
+	CancelAny(ctx context.Context, id uuid.UUID, now time.Time) (runs.Run, error)
+}
+
 func (a *Admin) registerRuns() {
+	if a.d.RunStarter != nil {
+		a.handle("POST", "/admin/runs", AccessAdmin, a.runsCreate)
+		a.handle("POST", "/admin/runs/{id}/cancel", AccessAdmin, a.runsCancel)
+	}
 	a.handle("GET", "/admin/runs/summary", AccessViewer, a.runsSummary)
 	a.handle("GET", "/admin/runs/activity", AccessViewer, a.runsActivity)
 	a.handle("GET", "/admin/runs", AccessViewer, a.runsList)
@@ -140,6 +154,19 @@ func (a *Admin) runsList(w http.ResponseWriter, r *http.Request, _ auth.Claims) 
 		}
 		f.Status = runs.Status(s)
 	}
+	f.Q = strings.TrimSpace(q.Get("q"))
+	if len([]rune(f.Q)) > 100 {
+		writeAdminError(w, http.StatusBadRequest, "invalid_request", "Search text is limited to 100 characters.")
+		return
+	}
+	if s := q.Get("key_id"); s != "" {
+		id, err := uuid.Parse(s)
+		if err != nil {
+			writeAdminError(w, http.StatusBadRequest, "invalid_request", "key_id must be a key id.")
+			return
+		}
+		f.KeyID = &id
+	}
 	if s := q.Get("limit"); s != "" {
 		n, err := strconv.Atoi(s)
 		if err != nil || n < 1 || n > 100 {
@@ -193,5 +220,51 @@ func (a *Admin) runsGet(w http.ResponseWriter, r *http.Request, _ auth.Claims) {
 		writeAdminError(w, http.StatusInternalServerError, "internal_error", "Could not load the run.")
 	default:
 		writeJSON(w, http.StatusOK, runView(it, a.now()))
+	}
+}
+
+func (a *Admin) runsCreate(w http.ResponseWriter, r *http.Request, _ auth.Claims) {
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid_request", "Could not read the request.")
+		return
+	}
+	var req runs.Request
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid_request", "Send a JSON body with at least an input.")
+		return
+	}
+	run, err := a.d.RunStarter.Create(r.Context(), req, raw)
+	var v *runs.Validation
+	switch {
+	case errors.As(err, &v):
+		writeAdminError(w, http.StatusBadRequest, "invalid_request", v.Message)
+	case err != nil:
+		a.d.Log.Error("create run", "error", err)
+		writeAdminError(w, http.StatusInternalServerError, "internal_error", "Could not start the run. Try again.")
+	default:
+		writeJSON(w, http.StatusAccepted, map[string]any{"id": run.ID, "status": run.Status})
+	}
+}
+
+func (a *Admin) runsCancel(w http.ResponseWriter, r *http.Request, _ auth.Claims) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeAdminError(w, http.StatusNotFound, "not_found", "No run with that id.")
+		return
+	}
+	run, err := a.d.RunStarter.CancelAny(r.Context(), id, a.now())
+	switch {
+	case errors.Is(err, runs.ErrNotFound):
+		writeAdminError(w, http.StatusNotFound, "not_found", "No run with that id.")
+	case errors.Is(err, runs.ErrFinished):
+		writeAdminError(w, http.StatusConflict, "run_finished", "The run has already finished.")
+	case err != nil:
+		a.d.Log.Error("cancel run", "error", err)
+		writeAdminError(w, http.StatusInternalServerError, "internal_error", "Could not cancel the run. Try again.")
+	default:
+		writeJSON(w, http.StatusAccepted, map[string]any{"id": run.ID, "status": run.Status, "cancel_requested": run.CancelRequested})
 	}
 }

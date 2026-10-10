@@ -470,3 +470,44 @@ func TestACancelReachesARunningWorkerThroughItsHeartbeat(t *testing.T) {
 	cancel()
 	<-done
 }
+
+func TestAdminCancelAnyAndTheDashboardCreator(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	c := &Creator{Store: e.store, Key: func(context.Context) (keys.Key, error) { return e.key, nil },
+		Caps: Caps{MaxSteps: 10, MaxCost: 500_000, Deadline: time.Hour}, Known: func(m string) bool { return m == "default" }, Now: func() time.Time { return t0 }}
+
+	raw := []byte(`{"input":"hello","limits":{"max_steps":3,"max_cost_usd":9}}`)
+	var req Request
+	_ = json.Unmarshal(raw, &req)
+	run, err := c.Create(ctx, req, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := e.store.Get(ctx, run.ID)
+	if got.KeyID != e.key.ID || got.Status != Queued || got.Limits.MaxSteps != 3 || got.Limits.MaxCost != 500_000 {
+		t.Errorf("created run = %+v: made under the service's key, with the server cap applied", got)
+	}
+	bad := Request{Input: Input{Text: "x"}, Model: "nope"}
+	if _, err := c.Create(ctx, bad, []byte(`{}`)); err == nil {
+		t.Error("an unknown model is refused")
+	} else if _, ok := err.(*Validation); !ok {
+		t.Errorf("as a validation error: %T", err)
+	}
+
+	// An admin can cancel a run that belongs to a key other than the service's own.
+	other := e.create(t, "", Request{Input: Input{Text: "someone else's"}}, t0)
+	if _, err := e.store.RequestCancel(ctx, other.ID, uuid.New(), t0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a key cannot cancel another key's run: %v", err)
+	}
+	r, err := e.store.CancelAny(ctx, other.ID, t0)
+	if err != nil || r.Status != Cancelled {
+		t.Errorf("CancelAny: %+v %v", r, err)
+	}
+	if _, err := e.store.CancelAny(ctx, other.ID, t0); !errors.Is(err, ErrFinished) {
+		t.Errorf("twice: %v", err)
+	}
+	if _, err := e.store.CancelAny(ctx, uuid.New(), t0); !errors.Is(err, ErrNotFound) {
+		t.Errorf("unknown: %v", err)
+	}
+}
