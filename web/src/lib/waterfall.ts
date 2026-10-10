@@ -112,5 +112,5 @@ export function keepNode(n: GraphNode, f: StepFilter): boolean {
   if (f === "all") return true;
   if (f === "model") return n.type === "model_call";
   if (f === "tool") return n.type === "tool_call";
-  return n.state === "stopped" || n.state === "failed" || n.reissued || (n.type === "model_call" && n.attempts.length > 1 && !!(n.attempts[0].status || n.attempts[0].error_kind));
+  return n.state === "stopped" || n.state === "failed" || n.state === "waiting" || n.reissued || (n.type === "model_call" && n.attempts.length > 1 && !!(n.attempts[0].status || n.attempts[0].error_kind));
 }

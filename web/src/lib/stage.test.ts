@@ -85,6 +85,11 @@ describe("workers", () => {
     const c = workerCards({ ...base, run: { ...base.run, status: "succeeded" } } as RunGraph, new Date());
     expect(c[1]).toMatchObject({ state: "done", note: "finished the run" });
   });
+  it("a parked run is held by nobody: the worker let go of it", () => {
+    const one = { run: { status: "waiting_human", lease_expires_at: null }, nodes: [n({ step_no: 1, type: "model_call" })], workers: [{ id: "w-1", epochs: [1] }] } as unknown as RunGraph;
+    expect(workerCards(one, new Date())).toEqual([{ id: "w-1", epochs: [1], state: "parked", note: "let go of the run while it waits for a decision" }]);
+    expect(workerCards({ ...one, run: { ...one.run, status: "sleeping" } } as RunGraph, new Date())[0].note).toBe("let go of the run while it sleeps");
+  });
   it("a single worker run has nothing lost", () => {
     const one = { run: { status: "succeeded" }, nodes: [n({ step_no: 1, type: "model_call" })], workers: [{ id: "w-1", epochs: [1] }] } as unknown as RunGraph;
     expect(workerCards(one, new Date())).toEqual([{ id: "w-1", epochs: [1], state: "done", note: "finished the run" }]);

@@ -121,7 +121,7 @@ export function NeedsYou({ waiting, now }: { waiting: WaitingRun[]; now: Date })
                 Waiting {agoLabel(w.waiting_since, now).replace(" ago", "")}, {w.key}
               </span>
             </div>
-            <span className="tag mono">{w.tool}</span>
+            {w.tool ? <span className="tag mono">{w.tool}</span> : <span className="tag">asked by the model</span>}
             <Link className="btn sm pri" href={`/runs/${w.id}`}>
               Review
             </Link>

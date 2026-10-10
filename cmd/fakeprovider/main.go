@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -55,9 +56,10 @@ func main() {
 // hand. The task decides the script:
 //
 //	"approval"  asks a person before it goes on
+//	"order"     calls demo.lookup_order, a tool of an MCP server named demo
 //	"email"     calls send_email (register it, and list it in approval_required to hold it for approval)
 //	"sleep"     sleeps 45 seconds, then finishes
-//	"long"      makes 14 calls to the effect tool with big arguments, so the history gets compacted
+//	"long"      makes 8 calls to the effect tool with big arguments, so the history gets compacted
 //
 // Anything else answers at once. The summariser call (a system prompt that starts "Summarise") gets a short summary.
 func demoScript(delay time.Duration) func(*provider.ChatRequest) fake.Behavior {
@@ -67,12 +69,23 @@ func demoScript(delay time.Duration) func(*provider.ChatRequest) fake.Behavior {
 			switch m.Role {
 			case "system":
 				if strings.HasPrefix(m.Content.PlainText(), "Summarise this conversation") {
-					return fake.Behavior{Delay: delay, Text: "Summary: the agent had been working through the task; the earlier steps succeeded and nothing is pending."}
+					// Say what the task was, so the script keeps following it once the original message is folded away.
+					goal := ""
+					for _, o := range req.Messages {
+						if o.Role != "user" {
+							continue
+						}
+						text := o.Content.PlainText()
+						if i := strings.Index(text, "Task: "); i >= 0 { // a summary of an earlier summary keeps the task
+							goal = strings.TrimSuffix(firstLine(text[i+len("Task: "):]), ".")
+						} else {
+							goal = firstLine(strings.TrimPrefix(text, "[user] "))
+						}
+					}
+					return fake.Behavior{Delay: delay, Text: "Task: " + goal + ". The earlier steps succeeded and nothing is pending."}
 				}
 			case "user":
-				if task == "" {
-					task = strings.ToLower(m.Content.PlainText())
-				}
+				task += " " + strings.ToLower(m.Content.PlainText())
 			case "assistant":
 				asked++
 			}
@@ -83,6 +96,11 @@ func demoScript(delay time.Duration) func(*provider.ChatRequest) fake.Behavior {
 		}
 		done := func(msg string) fake.Behavior { return fake.Behavior{Delay: delay, Text: msg} }
 		switch {
+		case strings.Contains(task, "order"):
+			if asked == 0 {
+				return call("demo__lookup_order", `{"order_id":"A-1042"}`)
+			}
+			return done("I looked it up through the MCP server: the order has shipped.")
 		case strings.Contains(task, "email"):
 			if asked == 0 {
 				return call("send_email", `{"to":"dana@example.com","subject":"Your refund has been issued","body":"Hi Dana,\n\nWe have refunded $42.00 to your original payment method. It should appear within 3 to 5 days.\n\nThe support team"}`)
@@ -99,11 +117,26 @@ func demoScript(delay time.Duration) func(*provider.ChatRequest) fake.Behavior {
 			}
 			return done("I waited and checked again: the export is ready.")
 		case strings.Contains(task, "long"):
-			if asked < 14 {
-				return call("effect", fmt.Sprintf(`{"i":%d,"notes":%q}`, asked, strings.Repeat("analysis of the quarterly ledger line items ", 90)))
+			// Count from the last call's own argument, because compaction folds the earlier turns away.
+			next := 0
+			for _, m := range req.Messages {
+				for _, c := range m.ToolCalls {
+					var a struct{ I int }
+					if json.Unmarshal([]byte(c.Function.Arguments), &a) == nil && a.I+1 > next {
+						next = a.I + 1
+					}
+				}
+			}
+			if next < 8 {
+				return call("effect", fmt.Sprintf(`{"i":%d,"notes":%q}`, next, strings.Repeat("analysis of the quarterly ledger line items ", 90)))
 			}
 			return done("Finished the long investigation.")
 		}
 		return done("There was nothing to do for that task.")
 	}
+}
+
+func firstLine(s string) string {
+	line, _, _ := strings.Cut(strings.TrimSpace(s), "\n")
+	return line
 }

@@ -65,7 +65,7 @@ export function Workers({ cards }: { cards: WorkerCard[] }) {
         <li key={c.id} className={`worker ${c.state}`}>
           <span className="worker__dot" aria-hidden="true" />
           <span className="mono worker__id">{c.id}</span>
-          <span className="worker__state">{c.state === "holding" ? "Holding the run" : c.state === "stopped" ? "Lost" : "Done"}</span>
+          <span className="worker__state">{c.state === "holding" ? "Holding the run" : c.state === "parked" ? "Released" : c.state === "stopped" ? "Lost" : "Done"}</span>
           <span className="worker__note">{c.note}{c.epochs.length > 0 ? `, epoch ${c.epochs.join(", ")}` : ""}</span>
         </li>
       ))}

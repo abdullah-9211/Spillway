@@ -4,7 +4,7 @@ import { useState } from "react";
 import { waterfall } from "@/lib/waterfall";
 import type { RunGraph } from "@/lib/graph";
 
-const WORD = { finished: "finished", failed: "failed", running: "running", stopped: "stopped" } as const;
+const WORD = { finished: "finished", failed: "failed", running: "running", stopped: "stopped", waiting: "waiting for approval", sleeping: "sleeping" } as const;
 
 /** The run along time: one bar per attempt, so a slow step, a re-issue and the idle gap in a recovery are all visible. */
 export function Waterfall({ graph, now, selected, onSelect }: { graph: RunGraph; now: Date; selected: string | null; onSelect: (id: string) => void }) {

@@ -143,7 +143,7 @@ func TestToolErrorsAreConsecutive(t *testing.T) {
 	}
 }
 
-func TestCompactionReplacesEarlierTurnsAndKeepsTheSystemPrompt(t *testing.T) {
+func TestCompactionReplacesEarlierTurnsAndKeepsTheSystemPromptAndTheTask(t *testing.T) {
 	r := Request{System: "sys", Input: Input{Text: "start"}}
 	steps := []Step{
 		row(1, 1, ModelCall, PhaseStarted, 1, "w", ModelStarted{}, 0), modelOK(2, 1, 1, "w", calls("a")),
@@ -156,7 +156,7 @@ func TestCompactionReplacesEarlierTurnsAndKeepsTheSystemPrompt(t *testing.T) {
 	for _, m := range Replay(r, steps).Messages() {
 		got = append(got, m.Role+":"+m.Content.PlainText())
 	}
-	want := []string{"system:sys", "user:Summary of the conversation so far:\ndid a", "assistant:"}
+	want := []string{"system:sys", "user:start", "user:Summary of the conversation so far:\ndid a", "assistant:"}
 	if len(got) != len(want) {
 		t.Fatalf("messages after compaction = %q", got)
 	}

@@ -5,6 +5,19 @@ import { MAX_TASK, TASK_IDEAS, emptyNewRun, newRunBody, validateNewRun, type New
 import { Button } from "../ui";
 
 type Policy = { name: string; description: string };
+type ToolOption = { name: string; description: string; approval: boolean };
+
+type RegistryTool = { name: string; kind: "http" | "mcp"; description: string; requires_approval: boolean; mcp_tools?: { name: string; description: string }[] };
+
+/** What a run may be given: each HTTP tool, and each tool an MCP server was discovered to have. */
+export function toolOptions(list: RegistryTool[]): ToolOption[] {
+  const out: ToolOption[] = [];
+  for (const t of list) {
+    if (t.kind === "mcp") for (const m of t.mcp_tools ?? []) out.push({ name: m.name, description: m.description, approval: t.requires_approval });
+    else out.push({ name: t.name, description: t.description, approval: t.requires_approval });
+  }
+  return out;
+}
 
 /** Starts a run. It is made under the playground key, so it counts against that key's budget and rate limit. */
 export function NewRunPanel({ policies, onStarted, onClose }: { policies: Policy[]; onStarted: (id: string) => void; onClose: () => void }) {
@@ -12,6 +25,7 @@ export function NewRunPanel({ policies, onStarted, onClose }: { policies: Policy
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tried, setTried] = useState(false);
+  const [options, setOptions] = useState<ToolOption[]>([]);
   const ref = useRef<HTMLTextAreaElement>(null);
   const errors = validateNewRun(f);
   const set = (k: keyof NewRunForm, v: string) => setF((x) => ({ ...x, [k]: v }));
@@ -19,6 +33,26 @@ export function NewRunPanel({ policies, onStarted, onClose }: { policies: Policy
   useEffect(() => {
     ref.current?.focus();
   }, []);
+
+  useEffect(() => {
+    let dead = false;
+    fetch("/api/tools", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: { tools?: RegistryTool[] } | null) => {
+        if (!dead && d?.tools) setOptions(toolOptions(d.tools));
+      })
+      .catch(() => undefined); // no tool picker if the registry cannot be read; the run still starts
+    return () => {
+      dead = true;
+    };
+  }, []);
+
+  const toggle = (k: "tools" | "askFirst", name: string) =>
+    setF((x) => {
+      const cur = x[k] ?? [];
+      const next = cur.includes(name) ? cur.filter((n) => n !== name) : [...cur, name];
+      return k === "tools" ? { ...x, tools: next, askFirst: (x.askFirst ?? []).filter((n) => next.includes(n)) } : { ...x, askFirst: next };
+    });
 
   async function submit() {
     setTried(true);
@@ -82,6 +116,33 @@ export function NewRunPanel({ policies, onStarted, onClose }: { policies: Policy
           <input id="nr-system" className="inp" value={f.system} onChange={(e) => set("system", e.target.value)} placeholder="For example: answer in one paragraph" />
         </div>
       </div>
+      {options.length > 0 && (
+        <fieldset className="newrun__tools">
+          <legend className="lab">Tools the run may call</legend>
+          <p className="small">A call to a tool marked &quot;asks first&quot; waits for a person to approve it. The run also always has sleep and a way to ask for approval.</p>
+          <ul>
+            {options.map((o) => {
+              const on = (f.tools ?? []).includes(o.name);
+              const ask = o.approval || (f.askFirst ?? []).includes(o.name);
+              return (
+                <li key={o.name} className={on ? "on" : ""}>
+                  <label>
+                    <input type="checkbox" checked={on} onChange={() => toggle("tools", o.name)} />
+                    <span className="mono">{o.name}</span>
+                  </label>
+                  {o.description && <span className="small mute">{o.description}</span>}
+                  {on && (
+                    <label className="newrun__ask">
+                      <input type="checkbox" checked={ask} disabled={o.approval} onChange={() => toggle("askFirst", o.name)} />
+                      <span>{o.approval ? "Asks first (set on the tool)" : "Ask me first"}</span>
+                    </label>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </fieldset>
+      )}
       <details className="newrun__limits">
         <summary>Limits</summary>
         <p className="small">Leave a field empty to use the server&apos;s own limit. A run can ask for less than the server allows, never more.</p>
@@ -109,7 +170,7 @@ export function NewRunPanel({ policies, onStarted, onClose }: { policies: Policy
         </div>
       )}
       <div className="newrun__foot">
-        <p className="small">Runs started here are charged to the playground key. Tools are not available from the dashboard yet.</p>
+        <p className="small">Runs started here are charged to the playground key and count against its budget.</p>
         <div className="newrun__btns">
           <Button type="button" onClick={onClose}>Cancel</Button>
           <Button type="button" variant="primary" disabled={pending} onClick={() => void submit()}>{pending ? "Starting…" : "Start run"}</Button>

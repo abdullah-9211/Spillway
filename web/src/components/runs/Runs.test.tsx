@@ -374,6 +374,32 @@ describe("starting a run", () => {
     expect(await screen.findByRole("complementary", { name: "Run details" })).toBeInTheDocument();
   });
 
+  it("offers the registered tools, with approval, and sends the choice", async () => {
+    const tools = [
+      { name: "send_email", kind: "http", description: "Sends an email", requires_approval: true },
+      { name: "demo", kind: "mcp", description: "", requires_approval: false, mcp_tools: [{ name: "demo.lookup_order", description: "Looks up an order" }] },
+    ];
+    const f = vi.fn(async (url: string) => ({
+      ok: true,
+      status: url === "/api/runs" ? 202 : 200,
+      json: async () => (url === "/api/tools" ? { tools } : url === "/api/runs" ? { id: "new-run", status: "queued" } : snap()),
+    }));
+    vi.stubGlobal("fetch", f);
+    const u = up();
+    view(snap());
+    await u.click(screen.getByRole("button", { name: "New run" }));
+    const form = screen.getByRole("region", { name: "Start a run" });
+    const group = await within(form).findByRole("group", { name: "Tools the run may call" });
+    await u.type(within(form).getByLabelText("What should the run do?"), "refund Dana");
+    await u.click(within(group).getByRole("checkbox", { name: "send_email" }));
+    await u.click(within(group).getByRole("checkbox", { name: "demo.lookup_order" }));
+    expect(within(group).getByText("Asks first (set on the tool)")).toBeInTheDocument(); // a tool that requires approval cannot be unchecked
+    await u.click(within(group).getByRole("checkbox", { name: "Ask me first" }));
+    await u.click(within(form).getByRole("button", { name: "Start run" }));
+    const call = f.mock.calls.find((c) => c[0] === "/api/runs") as unknown as [string, RequestInit];
+    expect(JSON.parse(String(call[1].body))).toEqual({ input: "refund Dana", tools: ["send_email", "demo.lookup_order"], approval_required: ["demo.lookup_order"] }); // send_email asks first because the registry says so
+  });
+
   it("shows the service's refusal and keeps what was typed", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 400, json: async () => ({ code: "invalid_request", message: "unknown model or policy \"x\"" }) })));
     const u = up();

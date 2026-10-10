@@ -91,12 +91,9 @@ func Replay(req Request, steps []Step) *State {
 
 func NewState(req Request) *State {
 	st := &State{steps: map[int]*stepInfo{}, approved: map[string]bool{}}
-	for i, m := range req.InitialMessages() {
-		step := 0
-		if m.Role == "system" && i == 0 {
-			step = -1
-		}
-		st.entries = append(st.entries, entry{msg: m, step: step})
+	// What the caller gave (the system prompt and the input) is never compacted: step -1 marks it as always kept.
+	for _, m := range req.InitialMessages() {
+		st.entries = append(st.entries, entry{msg: m, step: -1})
 	}
 	return st
 }

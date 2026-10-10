@@ -365,7 +365,12 @@ export function visibleActive(snap: Snapshot, f: Filters): { running: RunItem[];
 
 // --- starting a run ---
 
-export type NewRunForm = { task: string; model: string; system: string; maxSteps: string; maxCost: string; deadlineMinutes: string };
+export type NewRunForm = {
+  task: string; model: string; system: string; maxSteps: string; maxCost: string; deadlineMinutes: string;
+  /** registered tool names the run may call, and which of them wait for a person before each call */
+  tools?: string[];
+  askFirst?: string[];
+};
 export const emptyNewRun: NewRunForm = { task: "", model: "default", system: "", maxSteps: "", maxCost: "", deadlineMinutes: "" };
 export const MAX_TASK = 8000;
 export const TASK_IDEAS = ["Summarise the open incidents and who owns them", "Draft three release-note bullets from the last week of changes", "List the risks in this plan and rank them"];
@@ -396,6 +401,11 @@ export function newRunBody(f: NewRunForm) {
   const body: Record<string, unknown> = { input: f.task.trim() };
   if (f.model && f.model !== "default") body.model = f.model;
   if (f.system.trim()) body.system = f.system.trim();
+  if (f.tools && f.tools.length) {
+    body.tools = f.tools;
+    const ask = (f.askFirst ?? []).filter((t) => f.tools?.includes(t));
+    if (ask.length) body.approval_required = ask;
+  }
   const limits: Record<string, number> = {};
   if (f.maxSteps.trim()) limits.max_steps = Number(f.maxSteps);
   if (f.maxCost.trim()) limits.max_cost_usd = Number(f.maxCost);

@@ -31,10 +31,14 @@ export const ICONS = {
   model: "M2 3h8v5.5H6.5L4.5 10.5V8.5H2z",
   tool: "M3 9l3.3-3.3M7.2 2.5a2.3 2.3 0 1 0 2.3 2.8L8 5.5 6.5 4z",
   goal: "M4 2.5v7l5-3.5z",
+  wait: "M4 2.5v7M8 2.5v7",
+  sleep: "M9.5 7A4 4 0 0 1 5 2.5a4 4 0 1 0 4.5 4.5z",
+  compact: "M2 3.5h8M3.5 6h5M5 8.5h2",
+  approve: "M2.5 6.5l2.2 2.2L9.5 3.5",
 };
 
 export type Lane = "model" | "tool";
-export type NodeState = "finished" | "failed" | "running" | "stopped";
+export type NodeState = "finished" | "failed" | "running" | "stopped" | "waiting" | "sleeping";
 
 export type LayoutNode = {
   id: string;
@@ -75,13 +79,20 @@ export type Layout = {
 };
 
 const laneOf = (t: GraphNode["type"]): Lane => (t === "model_call" || t === "compaction" ? "model" : "tool");
+
+function iconFor(t: GraphNode["type"]): string {
+  return t === "model_call" ? ICONS.model : t === "tool_call" ? ICONS.tool : t === "wait_human" ? ICONS.wait : t === "sleep" ? ICONS.sleep : ICONS.compact;
+}
 const top = (l: Lane) => (l === "model" ? GEO.modelTop : GEO.toolTop);
 
 const kindWord: Record<GraphNode["type"], string> = { model_call: "model call", tool_call: "tool call", wait_human: "approval", sleep: "sleep", compaction: "compaction" };
-const stateWord: Record<NodeState, string> = { finished: "finished", failed: "failed", running: "running", stopped: "stopped" };
+const stateWord: Record<NodeState, string> = { finished: "finished", failed: "failed", running: "running", stopped: "stopped", waiting: "waiting for approval", sleeping: "sleeping" };
 
 /** The words under a node's name: how long it took, or why it has no duration. */
 export function nodeMeta(n: GraphNode): string {
+  if (n.state === "waiting") return "needs you";
+  if (n.state === "sleeping") return n.seconds ? `sleeps ${durationLabel(n.seconds * 1000)}` : "sleeping";
+  if (n.type === "wait_human" && n.state === "finished" && n.decision) return n.decision === "approve" ? "approved" : "rejected";
   if (n.state === "stopped") return "stopped";
   if (n.state === "failed") return "failed";
   if (n.state === "finished" && n.cache && n.cache.startsWith("hit")) return "cached";
@@ -91,6 +102,9 @@ export function nodeMeta(n: GraphNode): string {
 }
 
 function markFor(n: GraphNode): string {
+  if (n.state === "waiting") return ICONS.wait;
+  if (n.state === "sleeping") return ICONS.sleep;
+  if (n.type === "wait_human" && n.decision === "reject") return ICONS.fail;
   if (n.state === "stopped") return ICONS.stop;
   if (n.state === "failed") return ICONS.fail;
   if (n.state === "running") return ICONS.run;
@@ -100,6 +114,9 @@ function markFor(n: GraphNode): string {
 function labelFor(n: GraphNode): string {
   if (n.type === "tool_call") return n.tool || "tool";
   if (n.type === "model_call") return n.model || "model call";
+  if (n.type === "wait_human") return n.gate && n.tool ? n.tool : "approval";
+  if (n.type === "sleep") return "sleep";
+  if (n.type === "compaction") return "compact";
   return kindWord[n.type];
 }
 
@@ -143,7 +160,7 @@ export function layoutGraph(g: Pick<RunGraph, "run" | "nodes" | "workers" | "rec
     const redo = n.reissued ? ", re-issued" : "";
     out.nodes.push({
       id, kind: lane === "model" ? "model" : "tool", x: colX(i + 1, shiftAt[i]), y: top(lane), w: NW, h: NH, step: n.step_no, state: n.state, reissued: n.reissued,
-      label: labelFor(n), meta: nodeMeta(n), icon: lane === "model" ? ICONS.model : ICONS.tool, mark: markFor(n), worker: n.worker, epoch: n.epoch,
+      label: labelFor(n), meta: nodeMeta(n), icon: iconFor(n.type), mark: markFor(n), worker: n.worker, epoch: n.epoch,
       tip: `Step ${n.step_no}, ${kindWord[n.type]}, ${stateWord[n.state]}${redo}, on ${n.worker}`, node: n,
     });
     const f = failedFirst(n);

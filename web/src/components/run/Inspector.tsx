@@ -13,6 +13,9 @@ export function shortKey(k: string): string {
 
 /** What to call an attempt's state: the word the tag shows. */
 export function nodeStateWord(n: GraphNode): string {
+  if (n.state === "waiting") return "Waiting for approval";
+  if (n.state === "sleeping") return "Sleeping";
+  if (n.type === "wait_human" && n.decision) return n.decision === "approve" ? "Approved" : "Rejected";
   if (n.state === "stopped") return "Stopped before it finished";
   if (n.state === "running") return "Running now";
   if (n.state === "failed") return "Failed";
@@ -34,6 +37,14 @@ export function narrative(n: GraphNode, all: GraphNode[]): [string, string][] {
     });
   }
   if (n.type === "tool_call" && n.arguments) lines.push(["arguments", n.arguments]);
+  if (n.type === "wait_human") {
+    if (n.reason) lines.push(["asked", n.reason]);
+    if (n.gate && n.tool) lines.push(["held tool", n.tool]);
+    if (n.arguments) lines.push(["arguments", n.arguments]);
+    if (n.decision) lines.push(["decision", `${n.decision === "approve" ? "approved" : "rejected"} by ${n.by || "someone"}${n.note ? `: ${n.note}` : ""}`]);
+  }
+  if (n.type === "sleep" && n.seconds) lines.push(["slept", `${n.seconds} seconds${n.wake_at ? `, until ${n.wake_at}` : ""}`]);
+  if (n.type === "compaction" && n.message) lines.push(["summary", n.message]);
   if (n.type === "model_call") {
     n.attempts.forEach((a, i) => {
       const bad = a.error_kind || a.status;
@@ -94,9 +105,10 @@ export function Inspector({ node, all, run, now, onSelect }: { node: GraphNode |
   const ids = all.map(id);
   const nb = neighbours(ids, id(node));
   const siblings = all.filter((x) => x.step_no === node.step_no);
-  const tone = node.state === "stopped" || node.state === "failed" ? "fail" : node.state === "running" || node.reissued ? "run" : "ok";
+  const tone =
+    node.state === "stopped" || node.state === "failed" || node.decision === "reject" ? "fail" : node.state === "waiting" ? "wait" : node.state === "sleeping" ? "accent" : node.state === "running" || node.reissued ? "run" : "ok";
   const tabs: { id: Tab; label: string }[] = [{ id: "overview", label: "Overview" }];
-  if (node.type === "tool_call") tabs.push({ id: "input", label: "Input" });
+  if (node.type === "tool_call" || (node.type === "wait_human" && node.arguments)) tabs.push({ id: "input", label: "Input" });
   tabs.push({ id: "output", label: node.error ? "Error" : "Output" });
   if (node.type === "model_call" && node.attempts.length > 0) tabs.push({ id: "providers", label: `Providers (${node.attempts.length})` });
   if (siblings.length > 1) tabs.push({ id: "attempts", label: `Attempts (${siblings.length})` });
@@ -111,11 +123,11 @@ export function Inspector({ node, all, run, now, onSelect }: { node: GraphNode |
         <button type="button" className="iconbtn" onClick={() => nb.prev && onSelect?.(nb.prev)} disabled={!nb.prev} aria-label="Previous step">‹</button>
         <div className="insp2__title">
           <h3>Step {node.step_no}, {KIND[node.type]}</h3>
-          <span className="mono small">{node.type === "tool_call" ? node.tool : node.provider && node.model ? `${node.provider}/${node.model}` : node.model}</span>
+          <span className="mono small">{node.type === "tool_call" || node.type === "wait_human" ? node.tool || node.reason : node.type === "sleep" ? (node.seconds ? `${node.seconds} s` : "") : node.provider && node.model ? `${node.provider}/${node.model}` : node.model}</span>
         </div>
         <span className="tag" style={{ ["--c" as string]: `var(--${tone})` }}>
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d={node.state === "stopped" || node.state === "failed" ? "M3 3l6 6M9 3l-6 6" : node.state === "running" ? "M6 1.5a4.5 4.5 0 1 0 4.5 4.5" : node.reissued ? "M10 6a4 4 0 1 1-1.2-2.8M10 2.5v2.3H7.7" : "M2.5 6.5l2.2 2.2L9.5 3.5"} />
+            <path d={node.state === "stopped" || node.state === "failed" || node.decision === "reject" ? "M3 3l6 6M9 3l-6 6" : node.state === "waiting" ? "M4 2.5v7M8 2.5v7" : node.state === "sleeping" ? "M9.5 7A4 4 0 0 1 5 2.5a4 4 0 1 0 4.5 4.5z" : node.state === "running" ? "M6 1.5a4.5 4.5 0 1 0 4.5 4.5" : node.reissued ? "M10 6a4 4 0 1 1-1.2-2.8M10 2.5v2.3H7.7" : "M2.5 6.5l2.2 2.2L9.5 3.5"} />
           </svg>
           {nodeStateWord(node)}
         </span>
@@ -167,7 +179,7 @@ export function Inspector({ node, all, run, now, onSelect }: { node: GraphNode |
           ) : node.message ? (
             <Code text={node.message} label="Model answer" />
           ) : (
-            <p className="mute">{node.state === "running" ? "Still running." : node.state === "stopped" ? "This attempt never wrote a result. Another worker carried on." : "Nothing was recorded."}</p>
+            <p className="mute">{node.state === "waiting" ? "Waiting for a person to decide." : node.state === "sleeping" ? "Asleep until the wake time." : node.state === "running" ? "Still running." : node.state === "stopped" ? "This attempt never wrote a result. Another worker carried on." : "Nothing was recorded."}</p>
           ))}
         {active === "providers" && (
           <ol className="prov">

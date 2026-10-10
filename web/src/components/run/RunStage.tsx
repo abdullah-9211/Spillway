@@ -391,6 +391,8 @@ function build(THREE: Three, post: Post, el: HTMLElement, live: Live): (() => vo
     if (n.kind === "goal") return C.accent;
     if (n.state === "stopped" || n.state === "failed") return C.fail;
     if (n.state === "running") return C.run;
+    if (n.state === "waiting") return C.wait;
+    if (n.state === "sleeping") return C.accent;
     return n.reissued ? C.run : C.ok;
   };
   const t0 = performance.now();
@@ -429,22 +431,28 @@ function build(THREE: Three, post: Post, el: HTMLElement, live: Live): (() => vo
       o.ringM.color.copy(color);
       (o.glow.material as InstanceType<Three["SpriteMaterial"]>).color.copy(color);
       o.cageM.opacity = replaying && r === "ahead" ? 0.25 : 0.95;
-      o.ringM.opacity = (replaying && r === "ahead" ? 0.15 : o.n.state === "running" || r === "active" ? 0.9 : 0.55) * (o.n.id === selected ? 1 : 0.85);
-      const glowT = replaying && r === "ahead" ? 0 : o.n.id === selected ? 0.6 : o.n.state === "running" || r === "active" ? 0.5 : o.n.state === "stopped" || o.n.state === "failed" ? 0.35 : 0.22;
+      const held = o.n.state === "waiting" || o.n.state === "sleeping";
+      o.ringM.opacity = (replaying && r === "ahead" ? 0.15 : o.n.state === "running" || r === "active" ? 0.9 : held ? 0.8 : 0.55) * (o.n.id === selected ? 1 : 0.85);
+      const glowT = replaying && r === "ahead" ? 0 : o.n.id === selected ? 0.6 : o.n.state === "running" || r === "active" ? 0.5 : o.n.state === "waiting" ? 0.55 : o.n.state === "stopped" || o.n.state === "failed" || o.n.state === "sleeping" ? 0.35 : 0.22;
       const gm = o.glow.material as InstanceType<Three["SpriteMaterial"]>;
       gm.blending = blend();
       gm.opacity += (glowT * (light ? 0.7 : 1) - gm.opacity) * 0.12;
       const sel = o.n.id === selected ? 1.18 : 1;
-      const pulseK = o.n.state === "running" || r === "active" ? 1 + 0.08 * Math.sin(clock / 220) : 1;
+      const pulseK = o.n.state === "running" || r === "active" ? 1 + 0.08 * Math.sin(clock / 220) : o.n.state === "waiting" ? 1 + 0.07 * Math.sin(clock / 520) : o.n.state === "sleeping" ? 1 + 0.03 * Math.sin(clock / 1400) : 1;
       o.group.scale.setScalar(Math.max(popBack, 0.0001) * base * sel * pulseK * (1 + o.hover * 0.12));
       const jitter = o.n.state === "stopped" ? (Math.random() - 0.5) * 2.2 : Math.sin(clock * 0.09) * o.shake * 7;
       o.group.position.set(o.x + jitter, o.y + Math.sin(clock / 900 + i) * 1.6, 0);
-      const want = o.n.state === "running" || r === "active" ? 1.8 : o.n.state === "stopped" ? 0.2 : 0.6;
+      const want = o.n.state === "running" || r === "active" ? 1.8 : o.n.state === "stopped" || o.n.state === "sleeping" ? 0.2 : o.n.state === "waiting" ? 0.9 : 0.6;
       o.spin += (want - o.spin) * Math.min(1, dt / 400);
       o.cage.rotation.x += (o.spin * dt) / 1000;
       o.cage.rotation.y += (o.spin * 1.3 * dt) / 1000;
       o.ring.rotation.z += (dt / 1000) * (o.n.reissued ? -0.8 : 0.3);
       if (o.n.state === "stopped" && Math.random() < dt / 160) spark(o.x, o.y, C.fail, 1, 70);
+      if (o.n.state === "waiting" && Math.random() < dt / 220) {
+        const a = clock / 500 + i;
+        spark(o.x + Math.cos(a) * 26, o.y + Math.sin(a) * 26, C.wait, 1, 18);
+      }
+      if (o.n.state === "sleeping" && Math.random() < dt / 600) spark(o.x + 18, o.y - 22, C.accent, 1, 14);
       if (o.n.state === "running" && Math.random() < dt / 90) {
         const a = clock / 300 + i;
         spark(o.x + Math.cos(a) * 24, o.y + Math.sin(a) * 24, C.run, 1, 20);
@@ -500,11 +508,14 @@ function build(THREE: Three, post: Post, el: HTMLElement, live: Live): (() => vo
       const redo = b.n.reissued && a.n.node?.step_no === b.n.node?.step_no;
       const st = plan.steps[i + 1];
       const ahead = replaying && st && reach(st, replayAt as number) === "ahead";
-      m.color.copy(redo ? C.run : b.n.state === "running" ? C.run : C.mute);
+      m.color.copy(redo ? C.run : b.n.state === "running" ? C.run : b.n.state === "waiting" ? C.wait : C.mute);
       m.opacity = ahead ? 0.15 : redo ? 0.9 : 0.55;
     });
 
     // packet
+    const runningIdx = g.nodes.findIndex((n) => n.state === "running");
+    const heldIdx = g.nodes.findIndex((n) => n.state === "waiting" || n.state === "sleeping");
+    const heldOnly = runLive && runningIdx < 0 && heldIdx >= 0;
     let target = { x: nodes[0].x, y: nodes[0].y };
     if (replaying) {
       const pk = packetAt(plan, replayAt as number);
@@ -513,8 +524,7 @@ function build(THREE: Three, post: Post, el: HTMLElement, live: Live): (() => vo
       target = pk.index === 0 ? { x: b.x, y: b.y } : curve(a, b, pk.u);
       packetIdx = pk.index;
     } else {
-      const runningIdx = g.nodes.findIndex((n) => n.state === "running");
-      const idx = runLive ? (runningIdx >= 0 ? runningIdx + 1 : nodes.length - 1) : nodes.length - 1;
+      const idx = runLive ? (runningIdx >= 0 ? runningIdx + 1 : heldIdx >= 0 ? heldIdx + 1 : nodes.length - 1) : nodes.length - 1;
       const dest = nodes[Math.min(idx, nodes.length - 1)];
       const prev = nodes[Math.max(Math.min(idx, nodes.length - 1) - 1, 0)];
       // ride back and forth along the last link while a step runs, so a live run looks alive
@@ -528,7 +538,7 @@ function build(THREE: Three, post: Post, el: HTMLElement, live: Live): (() => vo
     packetGlow.position.set(dx, dy, 1.5);
     (packetCore.material as InstanceType<Three["MeshBasicMaterial"]>).color.copy(light ? C.accent : C.text);
     const gm = packetGlow.material as InstanceType<Three["SpriteMaterial"]>;
-    gm.color.copy(replaying ? C.accent : runLive ? C.run : C.ok);
+    gm.color.copy(replaying ? C.accent : heldOnly ? C.wait : runLive ? C.run : C.ok);
     gm.blending = blend();
     gm.opacity = (light ? 0.55 : 0.9) * (0.75 + 0.25 * Math.sin(clock / 150)) * (!replaying && !runLive ? 0.6 : 1);
     trail.unshift([dx, dy]);
@@ -539,7 +549,7 @@ function build(THREE: Three, post: Post, el: HTMLElement, live: Live): (() => vo
       tailPos[i * 3 + 1] = p[1];
       tailPos[i * 3 + 2] = 1;
       const f = Math.pow(1 - i / TAIL, 2) * (i < trail.length ? 1 : 0);
-      const c = replaying ? C.accent : runLive ? C.run : C.ok;
+      const c = replaying ? C.accent : heldOnly ? C.wait : runLive ? C.run : C.ok;
       tailCol[i * 3] = c.r * f;
       tailCol[i * 3 + 1] = c.g * f;
       tailCol[i * 3 + 2] = c.b * f;
@@ -547,7 +557,7 @@ function build(THREE: Three, post: Post, el: HTMLElement, live: Live): (() => vo
     tailGeo.attributes.position.needsUpdate = true;
     tailGeo.attributes.color.needsUpdate = true;
     tailMat.blending = blend();
-    if (runLive && !replaying && Math.random() < dt / 30) spark(dx, dy, C.run, 1, 30);
+    if (runLive && !replaying && Math.random() < dt / (heldOnly ? 160 : 30)) spark(dx, dy, heldOnly ? C.wait : C.run, 1, 30);
 
     // changes in the live data: new steps pop in, a run that ends celebrates or mourns
     g.nodes.forEach((n) => {
@@ -558,6 +568,9 @@ function build(THREE: Three, post: Post, el: HTMLElement, live: Live): (() => vo
         if (n.state === "finished") {
           pulse(o.x, o.y, C.ok, 70, 700);
           spark(o.x, o.y, [C.ok, C.text], 26, 190, 25);
+        } else if (n.state === "waiting") {
+          pulse(o.x, o.y, C.wait, 80, 900);
+          spark(o.x, o.y, C.wait, 18, 140);
         } else if (n.state === "failed" || n.state === "stopped") {
           pulse(o.x, o.y, C.fail, 80, 700);
           spark(o.x, o.y, C.fail, 36, 200);

@@ -7,6 +7,8 @@ const TITLE: Record<GraphNode["type"], string> = { model_call: "Model call", too
 
 function who(n: GraphNode): string {
   if (n.type === "tool_call") return n.tool || "tool";
+  if (n.type === "wait_human") return n.gate && n.tool ? n.tool : "request_human_approval";
+  if (n.type === "sleep") return "sleep";
   if (n.type === "model_call") return n.provider && n.model ? `${n.provider}/${n.model}` : n.model || "model";
   return TITLE[n.type].toLowerCase();
 }
@@ -29,6 +31,9 @@ function tags(n: GraphNode): string[] {
   if (n.reissued) t.push(n.idempotency_key ? "Same key as the first attempt" : "Re-issued after recovery");
   if (n.state === "stopped") t.push("Stopped before it finished");
   if (n.state === "running") t.push("Waiting for a result");
+  if (n.state === "waiting") t.push("Waiting for a person");
+  if (n.state === "sleeping") t.push("Asleep until its wake time");
+  if (n.type === "wait_human" && n.decision) t.push(n.decision === "approve" ? `Approved by ${n.by || "someone"}` : `Rejected by ${n.by || "someone"}`);
   return t;
 }
 
@@ -36,16 +41,24 @@ function body(n: GraphNode): string {
   const parts: string[] = [];
   if (n.type === "model_call") {
     if (n.message) parts.push(`Assistant: ${n.message}`);
+  } else if (n.type === "wait_human") {
+    if (n.reason) parts.push(`Asked: ${n.reason}`);
+    if (n.arguments) parts.push(`Arguments: ${n.arguments}`);
+    if (n.note) parts.push(`Note: ${n.note}`);
+  } else if (n.type === "sleep") {
+    if (n.seconds) parts.push(`Sleeps ${n.seconds} seconds`);
+  } else if (n.type === "compaction") {
+    if (n.message) parts.push(`Summary: ${n.message}`);
   } else {
     if (n.arguments) parts.push(`Arguments: ${n.arguments}`);
     if (n.result) parts.push(`Result: ${n.result}`);
   }
   if (n.error) parts.push(`Error: ${n.error}`);
-  if (parts.length === 0) parts.push(n.state === "running" ? "In progress…" : n.state === "stopped" ? "This attempt never wrote a result." : "Nothing recorded.");
+  if (parts.length === 0) parts.push(n.state === "running" ? "In progress…" : n.state === "waiting" ? "Waiting for a decision." : n.state === "sleeping" ? "Sleeping." : n.state === "stopped" ? "This attempt never wrote a result." : "Nothing recorded.");
   return parts.join("\n");
 }
 
-const dur = (n: GraphNode) => (n.state === "running" ? "running" : n.duration_ms === null ? "stopped" : n.duration_ms < 1000 ? `${n.duration_ms} ms` : `${(n.duration_ms / 1000).toFixed(1)}s`);
+const dur = (n: GraphNode) => (n.state === "running" ? "running" : n.state === "waiting" ? "waiting" : n.state === "sleeping" ? "sleeping" : n.duration_ms === null ? "stopped" : n.duration_ms < 1000 ? `${n.duration_ms} ms` : `${(n.duration_ms / 1000).toFixed(1)}s`);
 
 /** The run as a vertical list of steps, with the recovery shown where it happened. */
 const FILTERS: { id: StepFilter; label: string }[] = [
@@ -84,8 +97,8 @@ export function Timeline({ graph, selected, onSelect }: { graph: RunGraph; selec
       {items.length === 0 && <p className="empty panel">{graph.nodes.length === 0 ? "The run has not started a step yet." : "No steps match this filter."}</p>}
       {items.map(({ n, rec, i }) => {
         const id = `${n.step_no}:${n.epoch}`;
-        const tone = n.state === "running" ? "run" : n.state === "stopped" || n.state === "failed" ? "bad" : n.reissued ? "redo" : "";
-        const icon = n.state === "running" ? ICONS.run : n.state === "stopped" || n.state === "failed" ? ICONS.fail : n.reissued ? ICONS.redo : ICONS.ok;
+        const tone = n.state === "running" ? "run" : n.state === "waiting" ? "wait" : n.state === "sleeping" ? "sleep" : n.state === "stopped" || n.state === "failed" ? "bad" : n.reissued ? "redo" : "";
+        const icon = n.state === "running" ? ICONS.run : n.state === "waiting" ? ICONS.wait : n.state === "sleeping" ? ICONS.sleep : n.state === "stopped" || n.state === "failed" ? ICONS.fail : n.reissued ? ICONS.redo : ICONS.ok;
         return (
           <div key={id}>
             {rec && (
@@ -109,7 +122,7 @@ export function Timeline({ graph, selected, onSelect }: { graph: RunGraph; selec
                 </span>
                 <span className="line" />
               </div>
-              <div className={`panel card ${n.state === "running" ? "live" : ""} ${selected === id ? "sel" : ""}`.trim()} style={{ animationDelay: `${Math.min(i, 12) * 40}ms` }}>
+              <div className={`panel card ${n.state === "running" ? "live" : n.state === "waiting" ? "live wait" : ""} ${selected === id ? "sel" : ""}`.trim()} style={{ animationDelay: `${Math.min(i, 12) * 40}ms` }}>
                 <button type="button" className="card__select" aria-pressed={selected === id} aria-label={`Select step ${n.step_no}, ${TITLE[n.type].toLowerCase()}, attempt on ${n.worker}`} onClick={() => onSelect(id)} />
                 <span className="ch">
                   <strong>{TITLE[n.type]}</strong>

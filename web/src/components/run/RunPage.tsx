@@ -13,6 +13,7 @@ import { GraphCanvas } from "./GraphCanvas";
 import { Inspector, shortKey } from "./Inspector";
 import { Waterfall } from "./Waterfall";
 import { AnimatedNumber, Feed, Workers } from "./parts";
+import { ApprovalCard, DecisionNote, SleepCard, type Decided } from "./Parked";
 import { RunStage, STAGE_H, type Hover } from "./RunStage";
 import { Timeline } from "./Timeline";
 
@@ -23,7 +24,7 @@ type View = "graph" | "timeline";
 
 /** The default selection: the re-issued attempt (the point of the demo), else the one running, else the last. */
 function defaultSelection(g: RunGraph): string | null {
-  const pick = g.nodes.find((n) => n.reissued) ?? g.nodes.find((n) => n.state === "running") ?? g.nodes[g.nodes.length - 1];
+  const pick = g.nodes.find((n) => n.reissued) ?? g.nodes.find((n) => n.state === "running" || n.state === "waiting" || n.state === "sleeping") ?? g.nodes[g.nodes.length - 1];
   return pick ? `${pick.step_no}:${pick.epoch}` : null;
 }
 
@@ -50,6 +51,7 @@ export function RunPage({ initial, view: initialView }: { initial: RunGraph; vie
   const [replay, setReplay] = useState<{ at: number; playing: boolean; speed: number } | null>(null);
   const [hover, setHover] = useState<Hover>(null);
   const [ended, setEnded] = useState<string | null>(null);
+  const [decided, setDecided] = useState<Decided | null>(null);
   const prevStatus = useRef(initial.run.status);
   const id = initial.run.id;
   const isLive = LIVE_STATUSES.has(graph.run.status);
@@ -133,7 +135,7 @@ export function RunPage({ initial, view: initialView }: { initial: RunGraph; vie
   const sel = graph.nodes.find((n) => `${n.step_no}:${n.epoch}` === selected) ?? null;
   const ms = meters(graph.run, now);
   const lastWorker = graph.workers.length ? graph.workers[graph.workers.length - 1].id : graph.run.lease_owner ?? "none yet";
-  const status = { status: graph.run.status, wake_at: null };
+  const status = { status: graph.run.status, wake_at: graph.run.wake_at };
 
   // Left and right arrows walk through the attempts, when nothing that takes the keys has focus.
   useEffect(() => {
@@ -220,6 +222,15 @@ export function RunPage({ initial, view: initialView }: { initial: RunGraph; vie
         <div className="err" role="alert">
           <span>{error}</span>
         </div>
+      )}
+
+      {graph.run.status === "waiting_human" && graph.run.approval ? (
+        <ApprovalCard runId={id} approval={graph.run.approval} isAdmin={isAdmin} now={now} onDecided={(d) => { if (d) setDecided(d); void refetch(); }} />
+      ) : (
+        decided && <DecisionNote done={decided} />
+      )}
+      {graph.run.status === "sleeping" && graph.run.wake_at && (
+        <SleepCard wakeAt={graph.run.wake_at} seconds={graph.nodes.find((n) => n.state === "sleeping")?.seconds} now={now} />
       )}
 
       {ended && (
@@ -323,6 +334,8 @@ export function RunPage({ initial, view: initialView }: { initial: RunGraph; vie
               <span><i className="lk" style={{ border: "1.5px dashed var(--fail)", borderRadius: 3 }} />Attempt that stopped</span>
               <span><i className="lk" style={{ border: "1.5px dashed var(--run)", borderRadius: 3 }} />Re-issued after recovery</span>
               <span><i className="lk" style={{ borderColor: "var(--run)", borderRadius: 3 }} />Running now</span>
+              <span><i className="lk" style={{ borderColor: "var(--wait)", borderRadius: 3 }} />Waiting for approval</span>
+              <span><i className="lk" style={{ borderColor: "var(--accent)", borderRadius: 3 }} />Sleeping</span>
             </div>
           </>
         ) : (
@@ -332,7 +345,7 @@ export function RunPage({ initial, view: initialView }: { initial: RunGraph; vie
               <section className="panel sp">
                 <h3>Worker lease</h3>
                 <dl className="rdl">
-                  <dt>Held by</dt><dd className="mono">{isLive ? graph.run.lease_owner ?? "nobody" : "released"}</dd>
+                  <dt>Held by</dt><dd className="mono">{graph.run.status === "waiting_human" || graph.run.status === "sleeping" ? "nobody, it is parked" : isLive ? graph.run.lease_owner ?? "nobody" : "released"}</dd>
                   <dt>Lease epoch</dt><dd className="num">{graph.run.lease_epoch}</dd>
                   <dt>Lease expires in</dt><dd className="num">{isLive && graph.run.lease_expires_at ? shortSpan(new Date(graph.run.lease_expires_at).getTime() - now.getTime()) : "-"}</dd>
                   <dt>Recoveries</dt><dd className="num">{graph.recoveries.length}</dd>

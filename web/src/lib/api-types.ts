@@ -355,6 +355,108 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/runs/{id}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Approve a run that waits for a person
+         * @description Resolves the run's pending wait_human step. The run is claimable at once, by any worker, including one that starts after the worker that parked it has gone.
+         */
+        post: operations["runApprove"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/runs/{id}/reject": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reject a run that waits for a person
+         * @description Ends the run as failed with reason "rejected". The note is kept on the step.
+         */
+        post: operations["runReject"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/tools": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The tool registry
+         * @description HTTP tools and MCP servers. Auth header values are never returned, only their names.
+         */
+        get: operations["toolsList"];
+        put?: never;
+        /** Register a tool or an MCP server */
+        post: operations["toolCreate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/tools/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Change a tool
+         * @description Fields left out are kept. Headers, when sent, replace the stored ones.
+         */
+        put: operations["toolUpdate"];
+        post?: never;
+        /** Remove a tool */
+        delete: operations["toolDelete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/tools/{id}/discover": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Fetch an MCP server's tools
+         * @description Calls tools/list on the server and stores the answer. Its tools are then usable in a run as `server.tool`.
+         */
+        post: operations["toolDiscover"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -761,12 +863,76 @@ export interface components {
             injected?: boolean;
             estimated?: boolean;
         };
+        Decision: {
+            note?: string;
+        };
+        Tool: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            /** @enum {string} */
+            kind: "http" | "mcp";
+            endpoint: string;
+            description: string;
+            /** @description http tools: the JSON Schema of the arguments */
+            input_schema?: {
+                [key: string]: unknown;
+            };
+            /** @description mcp servers: what the last discover found. Names are `server.tool`. */
+            mcp_tools?: {
+                name: string;
+                description: string;
+                input_schema?: {
+                    [key: string]: unknown;
+                };
+            }[];
+            header_names: string[];
+            /** Format: int64 */
+            timeout_ms: number;
+            requires_approval: boolean;
+            /** Format: date-time */
+            discovered_at: string | null;
+            /** Format: date-time */
+            created_at: string;
+        };
+        ToolInput: {
+            name: string;
+            /**
+             * @default http
+             * @enum {string}
+             */
+            kind: "http" | "mcp";
+            endpoint: string;
+            description?: string;
+            headers?: {
+                [key: string]: string;
+            };
+            input_schema?: {
+                [key: string]: unknown;
+            };
+            /** Format: int64 */
+            timeout_ms?: number;
+            requires_approval?: boolean;
+        };
+        ToolUpdate: {
+            endpoint?: string;
+            description?: string;
+            headers?: {
+                [key: string]: string;
+            };
+            input_schema?: {
+                [key: string]: unknown;
+            };
+            /** Format: int64 */
+            timeout_ms?: number;
+            requires_approval?: boolean;
+        };
         GraphNode: {
             step_no: number;
             /** @enum {string} */
             type: "model_call" | "tool_call" | "wait_human" | "sleep" | "compaction";
             /** @enum {string} */
-            state: "finished" | "failed" | "running" | "stopped";
+            state: "finished" | "failed" | "running" | "stopped" | "waiting" | "sleeping";
             worker: string;
             /** Format: int64 */
             epoch: number;
@@ -796,6 +962,21 @@ export interface components {
             result?: string;
             message?: string;
             error?: string;
+            /** @description wait_human: why the run waits */
+            reason?: string;
+            /** @description wait_human: true when a tool is held for approval, false when the model asked */
+            gate?: boolean;
+            /** @enum {string} */
+            decision?: "approve" | "reject";
+            by?: string;
+            note?: string;
+            /** @description sleep: how long */
+            seconds?: number;
+            /**
+             * Format: date-time
+             * @description sleep: when it ends
+             */
+            wake_at?: string;
         };
         RunGraph: {
             run: {
@@ -825,6 +1006,21 @@ export interface components {
                 lease_epoch: number;
                 /** Format: date-time */
                 lease_expires_at: string | null;
+                /**
+                 * Format: date-time
+                 * @description Set while the run sleeps
+                 */
+                wake_at: string | null;
+                /** @description Set while the run waits for a person */
+                approval: {
+                    step_no: number;
+                    reason: string;
+                    tool?: string;
+                    arguments?: string;
+                    gate: boolean;
+                    /** Format: date-time */
+                    since: string;
+                } | null;
             };
             workers: {
                 id: string;
@@ -848,6 +1044,19 @@ export interface components {
         };
     };
     responses: {
+        /** @description The decision was recorded */
+        Decided: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": {
+                    /** Format: uuid */
+                    id: string;
+                    status: string;
+                };
+            };
+        };
         /** @description The request is not valid */
         BadRequest: {
             headers: {
@@ -1569,6 +1778,215 @@ export interface operations {
             404: components["responses"]["NotFound"];
             /** @description The run already finished */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    runApprove: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["Decision"];
+            };
+        };
+        responses: {
+            202: components["responses"]["Decided"];
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description The run is not waiting for a decision, or already finished */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    runReject: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["Decision"];
+            };
+        };
+        responses: {
+            202: components["responses"]["Decided"];
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description The run is not waiting for a decision, or already finished */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    toolsList: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Registered tools */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        tools: components["schemas"]["Tool"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    toolCreate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ToolInput"];
+            };
+        };
+        responses: {
+            /** @description Registered */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Tool"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description A tool with that name exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    toolUpdate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ToolUpdate"];
+            };
+        };
+        responses: {
+            /** @description Updated */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Tool"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    toolDelete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    toolDiscover: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The server with its discovered tools */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Tool"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description The MCP server could not be reached or answered badly */
+            502: {
                 headers: {
                     [name: string]: unknown;
                 };

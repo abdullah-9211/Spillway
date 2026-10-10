@@ -26,6 +26,7 @@ const runsUsage = `usage:
 These talk to a running service over HTTP, as any API client would.
 flags (all subcommands): --url (SPILLWAY_URL, default http://localhost:8080)  --key (SPILLWAY_API_KEY)  --json
 create flags: --model  --system  --tools a,b  --max-steps  --max-cost-usd  --deadline-seconds  --idempotency-key  --wait
+              --approval-required a,b (tools that wait for a person)  --compact-at TOKENS  --keep-turns N
 `
 
 type runsClient struct {
@@ -128,8 +129,8 @@ func runsCmd(ctx context.Context, args []string, getenv func(string) string, std
 	base := fs.String("url", envOr(getenv, "SPILLWAY_URL", "http://localhost:8080"), "service URL")
 	key := fs.String("key", getenv("SPILLWAY_API_KEY"), "API key")
 	asJSON := fs.Bool("json", false, "print the raw JSON")
-	var model, system, idem, maxCost, toolList, note string
-	var maxSteps, deadline int
+	var model, system, idem, maxCost, toolList, note, approvalList string
+	var maxSteps, deadline, compactAt, keepTurns int
 	var wait bool
 	var after int64
 	switch sub {
@@ -137,6 +138,9 @@ func runsCmd(ctx context.Context, args []string, getenv func(string) string, std
 		fs.StringVar(&model, "model", "", "policy or model (default: the service's default policy)")
 		fs.StringVar(&system, "system", "", "system prompt")
 		fs.StringVar(&toolList, "tools", "", "comma-separated tool names the run may use")
+		fs.StringVar(&approvalList, "approval-required", "", "comma-separated tools (also in --tools) whose every call waits for a person")
+		fs.IntVar(&compactAt, "compact-at", 0, "compact the history once it is about this many tokens (default 24000)")
+		fs.IntVar(&keepTurns, "keep-turns", 0, "model turns kept verbatim when compacting (default 6)")
 		fs.IntVar(&maxSteps, "max-steps", 0, "step limit (the server's cap applies)")
 		fs.StringVar(&maxCost, "max-cost-usd", "", "cost limit in dollars (the server's cap applies)")
 		fs.IntVar(&deadline, "deadline-seconds", 0, "deadline in seconds (the server's cap applies)")
@@ -198,14 +202,30 @@ func runsCmd(ctx context.Context, args []string, getenv func(string) string, std
 		if system != "" {
 			body["system"] = system
 		}
-		if toolList != "" {
-			var names []string
-			for _, t := range strings.Split(toolList, ",") {
+		names := func(list string) []string {
+			var out []string
+			for _, t := range strings.Split(list, ",") {
 				if t = strings.TrimSpace(t); t != "" {
-					names = append(names, t)
+					out = append(out, t)
 				}
 			}
-			body["tools"] = names
+			return out
+		}
+		if toolList != "" {
+			body["tools"] = names(toolList)
+		}
+		if approvalList != "" {
+			body["approval_required"] = names(approvalList)
+		}
+		if compactAt > 0 || keepTurns > 0 {
+			c := map[string]int{}
+			if compactAt > 0 {
+				c["threshold_tokens"] = compactAt
+			}
+			if keepTurns > 0 {
+				c["keep_last_turns"] = keepTurns
+			}
+			body["compaction"] = c
 		}
 		limits := map[string]any{}
 		if maxSteps > 0 {

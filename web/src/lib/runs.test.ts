@@ -243,6 +243,9 @@ describe("starting a run", () => {
   });
   it("sends only what was set, with the deadline in seconds", () => {
     expect(newRunBody({ ...emptyNewRun, task: "  hi  " })).toEqual({ input: "hi" });
+    expect(newRunBody({ ...emptyNewRun, task: "hi", tools: ["send_email", "demo.lookup_order"], askFirst: ["send_email", "gone"] })).toEqual({
+      input: "hi", tools: ["send_email", "demo.lookup_order"], approval_required: ["send_email"],
+    });
     expect(newRunBody({ task: "hi", model: "cheap-fast", system: " be brief ", maxSteps: "5", maxCost: "0.25", deadlineMinutes: "1.5" })).toEqual({
       input: "hi", model: "cheap-fast", system: "be brief", limits: { max_steps: 5, max_cost_usd: 0.25, deadline_seconds: 90 },
     });

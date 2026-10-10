@@ -83,7 +83,7 @@ export function feedFrom(g: RunGraph): FeedItem[] {
 
 // --- the workers ---
 
-export type WorkerCard = { id: string; epochs: number[]; state: "holding" | "stopped" | "done"; note: string };
+export type WorkerCard = { id: string; epochs: number[]; state: "holding" | "parked" | "stopped" | "done"; note: string };
 
 /** Which worker holds the run now, and what became of the ones before it. */
 export function workerCards(g: RunGraph, now: Date): WorkerCard[] {
@@ -91,6 +91,10 @@ export function workerCards(g: RunGraph, now: Date): WorkerCard[] {
   return g.workers.map((w, i) => {
     const lastNodeOf = [...g.nodes].reverse().find((n) => n.worker === w.id);
     const isCurrent = i === g.workers.length - 1;
+    // A run waiting for a person, or asleep, is held by nobody: the worker let go of it, by design.
+    if (isCurrent && (g.run.status === "waiting_human" || g.run.status === "sleeping")) {
+      return { id: w.id, epochs: w.epochs, state: "parked" as const, note: g.run.status === "sleeping" ? "let go of the run while it sleeps" : "let go of the run while it waits for a decision" };
+    }
     if (isCurrent && live) {
       const left = g.run.lease_expires_at ? new Date(g.run.lease_expires_at).getTime() - now.getTime() : 0;
       return { id: w.id, epochs: w.epochs, state: "holding" as const, note: left > 0 ? `lease renews, expires in ${shortSpan(left)}` : "holds the run" };

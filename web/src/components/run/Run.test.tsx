@@ -50,7 +50,7 @@ const recovered: RunGraph = {
   run: {
     id: "01a121cc-ee68-74de-8171-8af2ee9ad8ff", status: "running", goal: "Research competitor pricing and summarise it into a table", key: "research-bot", model: "default", tools: ["web_search", "fetch_page"],
     step_count: 8, cost_usd: "0.062400", max_steps: 50, max_cost_usd: "1.000000", deadline_seconds: 900, created_at: "2026-10-09T11:56:00Z", finished_at: null,
-    deadline_at: "2026-10-09T12:11:00Z", failure_reason: null, cancel_requested: false, lease_owner: "w-4", lease_epoch: 3, lease_expires_at: "2026-10-09T12:00:30Z",
+    deadline_at: "2026-10-09T12:11:00Z", failure_reason: null, cancel_requested: false, lease_owner: "w-4", lease_epoch: 3, lease_expires_at: "2026-10-09T12:00:30Z", wake_at: null, approval: null,
   },
   workers: [{ id: "w-2", epochs: [1] }, { id: "w-4", epochs: [3] }],
   nodes: [

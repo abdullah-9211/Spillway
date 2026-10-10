@@ -124,8 +124,8 @@ export function GraphCanvas({ layout, selected, onSelect }: { layout: Layout; se
 }
 
 function GraphNodeButton({ n, index, longest, selected, onSelect }: { n: LayoutNode; index: number; longest: number; selected: boolean; onSelect: (id: string) => void }) {
-  const cls = ["gn", n.kind, n.state === "running" ? "run" : "", n.state === "stopped" ? "crash" : "", n.reissued ? "redo" : "", n.state === "failed" ? "bad" : "", n.state === "finished" && !n.reissued ? "done" : "", selected ? "sel" : ""].filter(Boolean).join(" ");
-  const markColor = n.state === "running" ? "var(--run)" : n.state === "stopped" || n.state === "failed" ? "var(--fail)" : n.reissued ? "var(--run)" : n.state === "goal" ? "var(--subtle)" : "var(--ok)";
+  const cls = ["gn", n.kind, n.state === "running" ? "run" : "", n.state === "waiting" ? "wait" : "", n.state === "sleeping" ? "sleep" : "", n.state === "stopped" ? "crash" : "", n.reissued ? "redo" : "", n.state === "failed" ? "bad" : "", n.state === "finished" && !n.reissued ? "done" : "", selected ? "sel" : ""].filter(Boolean).join(" ");
+  const markColor = n.state === "running" ? "var(--run)" : n.state === "waiting" ? "var(--wait)" : n.state === "sleeping" ? "var(--accent)" : n.state === "stopped" || n.state === "failed" ? "var(--fail)" : n.reissued ? "var(--run)" : n.state === "goal" ? "var(--subtle)" : "var(--ok)";
   const share = n.node && n.node.duration_ms !== null ? Math.max(4, Math.round((n.node.duration_ms / longest) * 100)) : 0;
   const content = (
     <>

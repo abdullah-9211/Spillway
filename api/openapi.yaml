@@ -409,7 +409,7 @@ paths:
     post:
       operationId: runsCreate
       summary: Start a run from the dashboard
-      description: The run is made under the built-in playground key and charged to it. Tools are not available from the dashboard yet.
+      description: The run is made under the built-in playground key and charged to it.
       x-access: admin
       security: [{ bearer: [] }]
       requestBody:
