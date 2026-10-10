@@ -11,6 +11,7 @@ import { RunTag } from "../runs/parts";
 import { feedFrom, replayPlan, workerCards } from "@/lib/stage";
 import { GraphCanvas } from "./GraphCanvas";
 import { Inspector, shortKey } from "./Inspector";
+import { Waterfall } from "./Waterfall";
 import { AnimatedNumber, Feed, Workers } from "./parts";
 import { RunStage, STAGE_H, type Hover } from "./RunStage";
 import { Timeline } from "./Timeline";
@@ -133,6 +134,24 @@ export function RunPage({ initial, view: initialView }: { initial: RunGraph; vie
   const ms = meters(graph.run, now);
   const lastWorker = graph.workers.length ? graph.workers[graph.workers.length - 1].id : graph.run.lease_owner ?? "none yet";
   const status = { status: graph.run.status, wake_at: null };
+
+  // Left and right arrows walk through the attempts, when nothing that takes the keys has focus.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA" || t.getAttribute("role") === "tab")) return;
+      if (e.metaKey || e.ctrlKey || e.altKey || graph.nodes.length === 0) return;
+      const ids = graph.nodes.map((n) => `${n.step_no}:${n.epoch}`);
+      const i = selected ? ids.indexOf(selected) : -1;
+      const next = e.key === "ArrowRight" ? Math.min(i + 1, ids.length - 1) : Math.max(i - 1, 0);
+      e.preventDefault();
+      picked.current = true;
+      setSelected(ids[i === -1 ? 0 : next]);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [graph.nodes, selected]);
 
   function choose(nodeId: string) {
     picked.current = true;
@@ -261,7 +280,7 @@ export function RunPage({ initial, view: initialView }: { initial: RunGraph; vie
               <button type="button" className="link-btn" onClick={() => setReplay(null)}>Back to live</button>
             </>
           )}
-          <span className="small mute replay__hint">Click a crystal or cube to inspect that step.</span>
+          <span className="small mute replay__hint">Click a crystal or cube to inspect that step. Arrow keys move between steps.</span>
         </div>
       </section>
 
@@ -332,7 +351,8 @@ export function RunPage({ initial, view: initialView }: { initial: RunGraph; vie
         )}
       </section>
 
-      {view === "graph" && <Inspector node={sel} all={graph.nodes} />}
+      <Waterfall graph={graph} now={now} selected={selected} onSelect={choose} />
+      {view === "graph" && <Inspector node={sel} all={graph.nodes} run={graph.run} now={now} onSelect={choose} />}
       </div>
       <aside className="runside" aria-label="Workers and activity">
         <section className="panel sp">

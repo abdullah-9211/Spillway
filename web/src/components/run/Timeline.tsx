@@ -1,4 +1,6 @@
+import { useState } from "react";
 import { ICONS, type GraphNode, type RunGraph } from "@/lib/graph";
+import { keepNode, type StepFilter } from "@/lib/waterfall";
 import { shortKey } from "./Inspector";
 
 const TITLE: Record<GraphNode["type"], string> = { model_call: "Model call", tool_call: "Tool call", wait_human: "Approval", sleep: "Sleep", compaction: "Compaction" };
@@ -46,15 +48,41 @@ function body(n: GraphNode): string {
 const dur = (n: GraphNode) => (n.state === "running" ? "running" : n.duration_ms === null ? "stopped" : n.duration_ms < 1000 ? `${n.duration_ms} ms` : `${(n.duration_ms / 1000).toFixed(1)}s`);
 
 /** The run as a vertical list of steps, with the recovery shown where it happened. */
+const FILTERS: { id: StepFilter; label: string }[] = [
+  { id: "all", label: "All steps" },
+  { id: "model", label: "Model calls" },
+  { id: "tool", label: "Tool calls" },
+  { id: "problems", label: "Problems and re-issues" },
+];
+
 export function Timeline({ graph, selected, onSelect }: { graph: RunGraph; selected: string | null; onSelect: (id: string) => void }) {
-  const items = graph.nodes.map((n, i) => {
-    const rec = i > 0 && n.epoch !== graph.nodes[i - 1].epoch ? graph.recoveries.find((r) => r.epoch === n.epoch) : undefined;
-    return { n, rec, i };
-  });
+  const [filter, setFilter] = useState<StepFilter>("all");
+  const [open, setOpen] = useState<Set<string>>(new Set());
+  const items = graph.nodes
+    .map((n, i) => {
+      const rec = i > 0 && n.epoch !== graph.nodes[i - 1].epoch ? graph.recoveries.find((r) => r.epoch === n.epoch) : undefined;
+      return { n, rec, i };
+    })
+    .filter(({ n }) => keepNode(n, filter));
+  const toggle = (id: string) =>
+    setOpen((cur) => {
+      const next = new Set(cur);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   return (
     <section className="tl" aria-label="Run steps">
-      {items.length === 0 && <p className="empty panel">The run has not started a step yet.</p>}
-      {items.map(({ n, rec }) => {
+      <div className="chips2 tl__filters" role="group" aria-label="Show">
+        {FILTERS.map((f) => (
+          <button key={f.id} type="button" className={`chip2 ${filter === f.id ? "on" : ""}`.trim()} aria-pressed={filter === f.id} onClick={() => setFilter(f.id)}>
+            {f.label}
+            <span className="num">{graph.nodes.filter((n) => keepNode(n, f.id)).length}</span>
+          </button>
+        ))}
+      </div>
+      {items.length === 0 && <p className="empty panel">{graph.nodes.length === 0 ? "The run has not started a step yet." : "No steps match this filter."}</p>}
+      {items.map(({ n, rec, i }) => {
         const id = `${n.step_no}:${n.epoch}`;
         const tone = n.state === "running" ? "run" : n.state === "stopped" || n.state === "failed" ? "bad" : n.reissued ? "redo" : "";
         const icon = n.state === "running" ? ICONS.run : n.state === "stopped" || n.state === "failed" ? ICONS.fail : n.reissued ? ICONS.redo : ICONS.ok;
@@ -81,7 +109,8 @@ export function Timeline({ graph, selected, onSelect }: { graph: RunGraph; selec
                 </span>
                 <span className="line" />
               </div>
-              <button type="button" className={`panel card ${n.state === "running" ? "live" : ""} ${selected === id ? "sel" : ""}`.trim()} aria-pressed={selected === id} onClick={() => onSelect(id)}>
+              <div className={`panel card ${n.state === "running" ? "live" : ""} ${selected === id ? "sel" : ""}`.trim()} style={{ animationDelay: `${Math.min(i, 12) * 40}ms` }}>
+                <button type="button" className="card__select" aria-pressed={selected === id} aria-label={`Select step ${n.step_no}, ${TITLE[n.type].toLowerCase()}, attempt on ${n.worker}`} onClick={() => onSelect(id)} />
                 <span className="ch">
                   <strong>{TITLE[n.type]}</strong>
                   <span className="mute">Step {n.step_no}</span>
@@ -97,8 +126,13 @@ export function Timeline({ graph, selected, onSelect }: { graph: RunGraph; selec
                     <span key={t} className="tag">{t}</span>
                   ))}
                 </span>
-                <span className="code mono">{body(n)}</span>
-              </button>
+                <span className={`code mono ${open.has(id) ? "open" : "clamp"}`}>{body(n)}</span>
+                {body(n).length > 220 && (
+                  <button type="button" className="link-btn card__more" onClick={() => toggle(id)} aria-expanded={open.has(id)}>
+                    {open.has(id) ? "Show less" : "Show all"}
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         );

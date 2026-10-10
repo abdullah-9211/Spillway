@@ -99,27 +99,52 @@ describe("the graph view", () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 
-  it("opens on the re-issued step and reads out what happened", () => {
+  it("opens on the re-issued step and reads out what happened, tab by tab", async () => {
+    const u = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     show(recovered);
     const insp = screen.getByRole("region", { name: "Selected step" });
     expect(insp).toHaveTextContent("Step 4, tool call");
     expect(insp).toHaveTextContent("Re-issued after recovery");
-    expect(insp).toHaveTextContent("first attempt");
-    expect(insp).toHaveTextContent("started on w-2 (epoch 1), stopped before it finished");
-    expect(insp).toHaveTextContent("started on w-4 (epoch 3) with the same key");
     expect(insp).toHaveTextContent("4b21d0…77");
-    expect(insp).toHaveTextContent("saved result returned");
+    expect(insp).toHaveTextContent("Re-issued after w-2 stopped at epoch 1");
+    expect(insp).toHaveTextContent("same idempotency key");
+    await u.click(within(insp).getByRole("tab", { name: "Output" }));
+    expect(within(insp).getByLabelText("Tool result")).toHaveTextContent("saved result returned");
+    await u.click(within(insp).getByRole("tab", { name: "Attempts (2)" }));
+    expect(insp).toHaveTextContent("First attempt");
+    expect(insp).toHaveTextContent("w-2, epoch 1");
+    expect(insp).toHaveTextContent("stopped before it finished");
+    expect(insp).toHaveTextContent("Second attempt");
+    expect(insp).toHaveTextContent("w-4, epoch 3");
+    await u.click(within(insp).getByRole("button", { name: /Attempt 1 on w-2/ }));
+    expect(screen.getByRole("region", { name: "Selected step" })).toHaveTextContent("Stopped before it finished");
   });
 
-  it("selecting a node shows that step, including a model call's fallback", async () => {
+  it("selecting a node shows that step, including a model call's fallback on its Providers tab", async () => {
     const u = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     show(recovered);
     await u.click(screen.getByRole("button", { name: /Step 3, model call/ }));
     const insp = screen.getByRole("region", { name: "Selected step" });
     expect(insp).toHaveTextContent("Step 3, model call");
-    expect(insp).toHaveTextContent("openai/mini primary, failed 503 in 340 ms");
-    expect(insp).toHaveTextContent("anthropic/sonnet fallback, answered in 2560 ms");
+    await u.click(within(insp).getByRole("tab", { name: "Providers (2)" }));
+    expect(insp).toHaveTextContent("openai/mini");
+    expect(insp).toHaveTextContent("Failed 503");
+    expect(insp).toHaveTextContent("anthropic/sonnet");
+    expect(insp).toHaveTextContent("Answered");
     expect(screen.getByRole("button", { name: /Step 3, model call/ })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("previous and next walk through the attempts", async () => {
+    const u = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    show(recovered);
+    const insp = () => screen.getByRole("region", { name: "Selected step" });
+    expect(insp()).toHaveTextContent("Step 4, tool call");
+    await u.click(within(insp()).getByRole("button", { name: "Previous step" }));
+    expect(insp()).toHaveTextContent("Stopped before it finished");
+    await u.click(within(insp()).getByRole("button", { name: "Previous step" }));
+    expect(insp()).toHaveTextContent("Step 3, model call");
+    await u.keyboard("{ArrowRight}");
+    expect(insp()).toHaveTextContent("Step 4, tool call");
   });
 
   it("switches to the timeline, which shows the recovery where it happened", async () => {
@@ -333,5 +358,45 @@ describe("activity and workers", () => {
   it("does not announce a run that was already over when the page opened", () => {
     show(ended);
     expect(screen.queryByText("The run succeeded")).not.toBeInTheDocument();
+  });
+});
+
+
+describe("the waterfall and the graph's tools", () => {
+  it("shows every attempt along time, and clicking a bar selects that step", async () => {
+    const u = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    show(recovered);
+    const wf = screen.getByRole("region", { name: "Where the time went" });
+    const bars = within(wf).getAllByRole("button");
+    expect(bars).toHaveLength(6);
+    await u.click(within(wf).getByRole("button", { name: /Step 5, web_search, running/ }));
+    expect(screen.getByRole("region", { name: "Selected step" })).toHaveTextContent("Step 5, tool call");
+    expect(within(wf).getByRole("button", { name: /Step 5/ })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("zooms the graph with its buttons", async () => {
+    const u = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    show(recovered);
+    const tools = screen.getByRole("group", { name: "Zoom" });
+    expect(within(tools).getByText("100%")).toBeInTheDocument();
+    await u.click(within(tools).getByRole("button", { name: "Zoom in" }));
+    expect(within(tools).getByText("115%")).toBeInTheDocument();
+    await u.click(within(tools).getByRole("button", { name: "Zoom out" }));
+    await u.click(within(tools).getByRole("button", { name: "Zoom out" }));
+    expect(within(tools).getByText("90%")).toBeInTheDocument();
+  });
+
+  it("filters the timeline to the problems, and expands long output", async () => {
+    const u = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    show(recovered, "admin", "timeline");
+    const tl = screen.getByRole("region", { name: "Run steps" });
+    expect(within(tl).getAllByText(/^Step \d/)).toHaveLength(6);
+    await u.click(within(tl).getByRole("button", { name: /Problems and re-issues/ }));
+    expect(within(tl).getAllByText(/^Step \d/)).toHaveLength(3); // the stopped attempt, its re-issue, and the fallback
+    await u.click(within(tl).getByRole("button", { name: /Tool calls/ }));
+    expect(within(tl).getAllByText(/^Step \d/)).toHaveLength(4);
+    await u.click(within(tl).getByRole("button", { name: /All steps/ }));
+    await u.click(within(tl).getByRole("button", { name: "Select step 4, tool call, attempt on w-4" }));
+    expect(screen.getByRole("region", { name: "Run steps" })).toBeInTheDocument();
   });
 });
