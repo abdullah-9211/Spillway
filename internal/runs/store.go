@@ -459,7 +459,8 @@ func (s *Store) Decide(ctx context.Context, id uuid.UUID, key *uuid.UUID, d Deci
 		return Run{}, ErrNotWaiting
 	}
 	var stepNo int
-	if err := tx.QueryRow(ctx, `SELECT step_no FROM run_steps WHERE run_id=$1 AND type='wait_human' AND phase='started' ORDER BY id DESC LIMIT 1`, id).Scan(&stepNo); err != nil {
+	var askedAt time.Time
+	if err := tx.QueryRow(ctx, `SELECT step_no, created_at FROM run_steps WHERE run_id=$1 AND type='wait_human' AND phase='started' ORDER BY id DESC LIMIT 1`, id).Scan(&stepNo, &askedAt); err != nil {
 		return Run{}, fmt.Errorf("runs: waiting run %s has no wait_human step: %w", id, err)
 	}
 	payload, _ := json.Marshal(d)
@@ -478,7 +479,9 @@ func (s *Store) Decide(ctx context.Context, id uuid.UUID, key *uuid.UUID, d Deci
 	}
 	if d.Decision == "approve" {
 		// Claimable at once: no lease, status running.
-		if _, err := tx.Exec(ctx, `UPDATE runs SET status='running', lease_owner=NULL, lease_expires_at=NULL WHERE id=$1`, id); err != nil {
+		// The time spent waiting for a person does not count against the run's deadline: the clock is moved on by it.
+		waited := max(now.Sub(askedAt), 0)
+		if _, err := tx.Exec(ctx, `UPDATE runs SET status='running', lease_owner=NULL, lease_expires_at=NULL, deadline_at = deadline_at + make_interval(secs => $2) WHERE id=$1`, id, seconds(waited)); err != nil {
 			return Run{}, err
 		}
 	} else {

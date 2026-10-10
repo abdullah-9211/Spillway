@@ -636,3 +636,27 @@ func TestSleepingRunWakesOnlyAtItsTime(t *testing.T) {
 		t.Errorf("cancel while sleeping: %+v %v", c, err)
 	}
 }
+
+func TestTimeWaitingForAPersonDoesNotCountAgainstTheDeadline(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	run := e.create(t, "", Request{Input: Input{Text: "go"}}, t0) // a 15 minute deadline
+	if found, err := poolFor(e, approvalModel(), nil, "w-1", func() time.Time { return t0 }).ClaimAndWork(ctx, ctx); err != nil || !found {
+		t.Fatal(found, err)
+	}
+	// Nobody looks for an hour, well past the deadline. Then the person approves.
+	later := t0.Add(time.Hour)
+	r, err := e.store.Decide(ctx, run.ID, &e.key.ID, Decision{Decision: "approve", By: "ana"}, later)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := run.DeadlineAt.Add(time.Hour); !r.DeadlineAt.Equal(want) {
+		t.Errorf("deadline = %s, want %s", r.DeadlineAt, want)
+	}
+	if found, err := poolFor(e, approvalModel(), nil, "w-2", func() time.Time { return later.Add(time.Second) }).ClaimAndWork(ctx, ctx); err != nil || !found {
+		t.Fatal(found, err)
+	}
+	if got, _ := e.store.Get(ctx, run.ID); got.Status != Succeeded {
+		t.Errorf("status = %s (%s), want succeeded", got.Status, got.FailureReason)
+	}
+}
