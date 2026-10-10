@@ -23,7 +23,7 @@ const runsUsage = `usage:
 
 These talk to a running service over HTTP, as any API client would.
 flags (all subcommands): --url (SPILLWAY_URL, default http://localhost:8080)  --key (SPILLWAY_API_KEY)  --json
-create flags: --model  --system  --max-steps  --max-cost-usd  --deadline-seconds  --idempotency-key  --wait
+create flags: --model  --system  --tools a,b  --max-steps  --max-cost-usd  --deadline-seconds  --idempotency-key  --wait
 `
 
 type runsClient struct {
@@ -126,7 +126,7 @@ func runsCmd(ctx context.Context, args []string, getenv func(string) string, std
 	base := fs.String("url", envOr(getenv, "SPILLWAY_URL", "http://localhost:8080"), "service URL")
 	key := fs.String("key", getenv("SPILLWAY_API_KEY"), "API key")
 	asJSON := fs.Bool("json", false, "print the raw JSON")
-	var model, system, idem, maxCost string
+	var model, system, idem, maxCost, toolList string
 	var maxSteps, deadline int
 	var wait bool
 	var after int64
@@ -134,6 +134,7 @@ func runsCmd(ctx context.Context, args []string, getenv func(string) string, std
 	case "create":
 		fs.StringVar(&model, "model", "", "policy or model (default: the service's default policy)")
 		fs.StringVar(&system, "system", "", "system prompt")
+		fs.StringVar(&toolList, "tools", "", "comma-separated tool names the run may use")
 		fs.IntVar(&maxSteps, "max-steps", 0, "step limit (the server's cap applies)")
 		fs.StringVar(&maxCost, "max-cost-usd", "", "cost limit in dollars (the server's cap applies)")
 		fs.IntVar(&deadline, "deadline-seconds", 0, "deadline in seconds (the server's cap applies)")
@@ -192,6 +193,15 @@ func runsCmd(ctx context.Context, args []string, getenv func(string) string, std
 		}
 		if system != "" {
 			body["system"] = system
+		}
+		if toolList != "" {
+			var names []string
+			for _, t := range strings.Split(toolList, ",") {
+				if t = strings.TrimSpace(t); t != "" {
+					names = append(names, t)
+				}
+			}
+			body["tools"] = names
 		}
 		limits := map[string]any{}
 		if maxSteps > 0 {

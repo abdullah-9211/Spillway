@@ -134,6 +134,8 @@ func TestResponsesMatchTheOpenAPISchema(t *testing.T) {
 		{"cancel a run as a viewer", "POST", "/admin/runs/" + sampleRunID + "/cancel", viewer, "", nil, 403},
 		{"runs list without a token", "GET", "/admin/runs", "", "", nil, 401},
 		{"one run", "GET", "/admin/runs/" + sampleRunID, viewer, "", nil, 200},
+		{"run graph", "GET", "/admin/runs/" + sampleRunID + "/graph", viewer, "", nil, 200},
+		{"run graph, unknown", "GET", "/admin/runs/" + uuid.NewString() + "/graph", viewer, "", nil, 404},
 		{"a run that does not exist", "GET", "/admin/runs/" + uuid.NewString(), viewer, "", nil, 404},
 		{"playground without a token", "GET", "/admin/playground", "", "", nil, 401},
 	}

@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -55,41 +57,34 @@ func endsStream(s runs.Step) bool {
 	return json.Unmarshal(s.Payload, &p) == nil && p.Status.Terminal()
 }
 
-// events streams a run's step rows as server-sent events. A client that reconnects with Last-Event-ID (or ?after=) first
-// gets every row after that id, then live ones. The stream ends after the final run.status event.
-func (a *runsAPI) events(w http.ResponseWriter, r *http.Request, key keys.Key, reqID uuid.UUID) {
-	id, ok := a.runID(w, r)
-	if !ok {
-		return
-	}
-	var after int64
+// stepSource reads a run's rows and says whether it has ended. The public API and the admin API each supply one.
+type stepSource struct {
+	steps    func(ctx context.Context, after int64, limit int) ([]runs.Step, error)
+	finished func(ctx context.Context) (bool, error)
+}
+
+// cursorOf reads the resume point: Last-Event-ID, or ?after=. ok is false (and a 400 sent) for a bad one.
+func cursorOf(r *http.Request) (int64, bool, string) {
 	cursor := r.Header.Get("Last-Event-ID")
 	if q := r.URL.Query().Get("after"); q != "" {
 		cursor = q
 	}
-	if cursor != "" {
-		n, err := strconv.ParseInt(cursor, 10, 64)
-		if err != nil || n < 0 {
-			writeError(w, 400, "invalid_request_error", "invalid_request", "after", "Last-Event-ID and after must be a step id, zero or more.")
-			return
-		}
-		after = n
+	if cursor == "" {
+		return 0, true, ""
 	}
-	if _, err := a.Store.GetForKey(r.Context(), id, key.ID); err != nil {
-		if errors.Is(err, runs.ErrNotFound) {
-			a.notFound(w)
-			return
-		}
-		a.internal(w, reqID, "get run", err)
-		return
+	n, err := strconv.ParseInt(cursor, 10, 64)
+	if err != nil || n < 0 {
+		return 0, false, "Last-Event-ID and after must be a step id, zero or more."
 	}
-	if a.Events == nil {
-		writeError(w, 501, "api_error", "events_unavailable", "", "Live events are not available on this server.")
-		return
-	}
+	return n, true, ""
+}
+
+// streamEvents writes a run's rows as server-sent events: every row after the cursor first, then live ones. The stream
+// ends after the final run.status event, or when the client goes. The caller has already checked access.
+func streamEvents(w http.ResponseWriter, r *http.Request, id uuid.UUID, after int64, src stepSource, ev Events, log *slog.Logger) {
 	rc := http.NewResponseController(w)
 	// Subscribe before the first read, so a row written in between is not missed.
-	wake, stop := a.Events.Subscribe(id)
+	wake, stop := ev.Subscribe(id)
 	defer stop()
 
 	h := w.Header()
@@ -114,10 +109,10 @@ func (a *runsAPI) events(w http.ResponseWriter, r *http.Request, key keys.Key, r
 	defer poll.Stop()
 	drained := false // the run is over and one more read found nothing new
 	for {
-		rows, err := a.Store.Steps(r.Context(), id, after, sseBatch)
+		rows, err := src.steps(r.Context(), after, sseBatch)
 		if err != nil {
 			if r.Context().Err() == nil {
-				a.log.Error("read run events", "request_id", reqID, "error", err)
+				log.Error("read run events", "run_id", id, "error", err)
 			}
 			return
 		}
@@ -137,7 +132,7 @@ func (a *runsAPI) events(w http.ResponseWriter, r *http.Request, key keys.Key, r
 		if len(rows) == 0 {
 			// A client that reconnects after the last event has nothing to wait for. The read after seeing the run
 			// finished is the check that no final row slipped in between.
-			if run, err := a.Store.GetForKey(r.Context(), id, key.ID); err == nil && run.Status.Terminal() {
+			if done, err := src.finished(r.Context()); err == nil && done {
 				if drained {
 					return
 				}
@@ -156,4 +151,38 @@ func (a *runsAPI) events(w http.ResponseWriter, r *http.Request, key keys.Key, r
 			}
 		}
 	}
+}
+
+// events is GET /v1/runs/{id}/events: the calling key's own run.
+func (a *runsAPI) events(w http.ResponseWriter, r *http.Request, key keys.Key, reqID uuid.UUID) {
+	id, ok := a.runID(w, r)
+	if !ok {
+		return
+	}
+	after, ok, msg := cursorOf(r)
+	if !ok {
+		writeError(w, 400, "invalid_request_error", "invalid_request", "after", msg)
+		return
+	}
+	if _, err := a.Store.GetForKey(r.Context(), id, key.ID); err != nil {
+		if errors.Is(err, runs.ErrNotFound) {
+			a.notFound(w)
+			return
+		}
+		a.internal(w, reqID, "get run", err)
+		return
+	}
+	if a.Events == nil {
+		writeError(w, 501, "api_error", "events_unavailable", "", "Live events are not available on this server.")
+		return
+	}
+	streamEvents(w, r, id, after, stepSource{
+		steps: func(ctx context.Context, after int64, limit int) ([]runs.Step, error) {
+			return a.Store.Steps(ctx, id, after, limit)
+		},
+		finished: func(ctx context.Context) (bool, error) {
+			run, err := a.Store.GetForKey(ctx, id, key.ID)
+			return run.Status.Terminal(), err
+		},
+	}, a.Events, a.log)
 }

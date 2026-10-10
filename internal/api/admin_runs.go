@@ -23,6 +23,8 @@ type RunsAdmin interface {
 	Activity(ctx context.Context, hours int, now time.Time) (time.Duration, []runs.Bucket, error)
 	List(ctx context.Context, f runs.ListFilter) ([]runs.Item, error)
 	Get(ctx context.Context, id uuid.UUID) (runs.Item, error)
+	Graph(ctx context.Context, id uuid.UUID, now time.Time) (runs.Graph, error)
+	Steps(ctx context.Context, id uuid.UUID, after int64, limit int) ([]runs.Step, error)
 }
 
 // RunStarter starts and cancels runs for an admin of the dashboard.
@@ -40,6 +42,10 @@ func (a *Admin) registerRuns() {
 	a.handle("GET", "/admin/runs/activity", AccessViewer, a.runsActivity)
 	a.handle("GET", "/admin/runs", AccessViewer, a.runsList)
 	a.handle("GET", "/admin/runs/{id}", AccessViewer, a.runsGet)
+	a.handle("GET", "/admin/runs/{id}/graph", AccessViewer, a.runsGraph)
+	if a.d.Events != nil {
+		a.handle("GET", "/admin/runs/{id}/events", AccessViewer, a.runsEvents)
+	}
 }
 
 func (a *Admin) now() time.Time {
@@ -267,4 +273,54 @@ func (a *Admin) runsCancel(w http.ResponseWriter, r *http.Request, _ auth.Claims
 	default:
 		writeJSON(w, http.StatusAccepted, map[string]any{"id": run.ID, "status": run.Status, "cancel_requested": run.CancelRequested})
 	}
+}
+
+func (a *Admin) runsGraph(w http.ResponseWriter, r *http.Request, _ auth.Claims) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeAdminError(w, http.StatusNotFound, "not_found", "No run with that id.")
+		return
+	}
+	g, err := a.d.Runs.Graph(r.Context(), id, a.now())
+	switch {
+	case errors.Is(err, runs.ErrNotFound):
+		writeAdminError(w, http.StatusNotFound, "not_found", "No run with that id.")
+	case err != nil:
+		a.d.Log.Error("run graph", "error", err)
+		writeAdminError(w, http.StatusInternalServerError, "internal_error", "Could not load the run graph.")
+	default:
+		writeJSON(w, http.StatusOK, g)
+	}
+}
+
+// runsEvents streams a run's rows to the dashboard, for either role: it is read-only.
+func (a *Admin) runsEvents(w http.ResponseWriter, r *http.Request, _ auth.Claims) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeAdminError(w, http.StatusNotFound, "not_found", "No run with that id.")
+		return
+	}
+	after, ok, msg := cursorOf(r)
+	if !ok {
+		writeAdminError(w, http.StatusBadRequest, "invalid_request", msg)
+		return
+	}
+	if _, err := a.d.Runs.Get(r.Context(), id); err != nil {
+		if errors.Is(err, runs.ErrNotFound) {
+			writeAdminError(w, http.StatusNotFound, "not_found", "No run with that id.")
+			return
+		}
+		a.d.Log.Error("run events", "error", err)
+		writeAdminError(w, http.StatusInternalServerError, "internal_error", "Could not load the run.")
+		return
+	}
+	streamEvents(w, r, id, after, stepSource{
+		steps: func(ctx context.Context, after int64, limit int) ([]runs.Step, error) {
+			return a.d.Runs.Steps(ctx, id, after, limit)
+		},
+		finished: func(ctx context.Context) (bool, error) {
+			it, err := a.d.Runs.Get(ctx, id)
+			return it.Status.Terminal(), err
+		},
+	}, a.d.Events, a.d.Log)
 }

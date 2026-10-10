@@ -3,13 +3,16 @@ package api
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/abdullah-9211/spillway/internal/runs"
+	"github.com/abdullah-9211/spillway/internal/usage"
 )
 
 const sampleRunID = "00000000-0000-7000-8000-000000000000"
@@ -17,6 +20,8 @@ const sampleRunID = "00000000-0000-7000-8000-000000000000"
 var runsNow = time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
 
 type fakeRunsAdmin struct {
+	mu      sync.Mutex
+	steps   map[uuid.UUID][]runs.Step
 	items   []runs.Item
 	summary runs.Summary
 	err     error
@@ -54,6 +59,30 @@ func (f *fakeRunsAdmin) List(_ context.Context, fl runs.ListFilter) ([]runs.Item
 	return out, nil
 }
 
+func (f *fakeRunsAdmin) Graph(_ context.Context, id uuid.UUID, now time.Time) (runs.Graph, error) {
+	for _, it := range f.items {
+		if it.ID == id {
+			return runs.Graph{Run: runs.GraphRun{ID: id, Status: it.Status, Goal: it.Goal, Key: it.Key, Model: it.Model, Tools: []string{}, CostUSD: "0.014700", MaxSteps: 50, MaxCostUSD: "1.000000",
+				DeadlineSeconds: 900, CreatedAt: it.CreatedAt, DeadlineAt: now}, Workers: []runs.GraphWorker{{ID: "w-1", Epochs: []int64{1}}},
+				Nodes:      []runs.GraphNode{{StepNo: 1, Type: runs.ModelCall, State: runs.NodeFinished, Worker: "w-1", Epoch: 1, StartedAt: now, CostUSD: "0.014700", Attempts: []usage.Attempt{}}},
+				Recoveries: []runs.Recovery{}, LastEvent: 7}, nil
+		}
+	}
+	return runs.Graph{}, runs.ErrNotFound
+}
+
+func (f *fakeRunsAdmin) Steps(_ context.Context, id uuid.UUID, after int64, limit int) ([]runs.Step, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []runs.Step
+	for _, s := range f.steps[id] {
+		if s.ID > after && len(out) < limit {
+			out = append(out, s)
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeRunsAdmin) Get(_ context.Context, id uuid.UUID) (runs.Item, error) {
 	for _, it := range f.items {
 		if it.ID == id {
@@ -74,7 +103,7 @@ func sampleRuns() *fakeRunsAdmin {
 	}
 	items[1].Status, items[1].FailureReason = runs.Failed, "max_steps"
 	items[2].Status, items[2].FinishedAt, items[2].Strip = runs.Running, nil, runs.Strip{}
-	return &fakeRunsAdmin{items: items, summary: runs.Summary{
+	return &fakeRunsAdmin{steps: map[uuid.UUID][]runs.Step{}, items: items, summary: runs.Summary{
 		Counts:  runs.Counts{Running: 6, NeedsYou: 2, Succeeded: 104, Failed: 11},
 		Waiting: []runs.Waiting{{ID: uuid.New(), Goal: "Send the Q3 renewal email", Tool: "send_email", WaitingSince: runsNow.Add(-2 * time.Minute), Key: "support-agent"}}}}
 }
@@ -85,6 +114,7 @@ func newRunsAdminRig(t *testing.T) (*adminRig, *fakeRunsAdmin) {
 	f := sampleRuns()
 	r.admin.d.Runs = f
 	r.admin.d.RunStarter = &fakeStarter{}
+	r.admin.d.Events = &fakeEvents{}
 	r.admin.d.Now = func() time.Time { return runsNow }
 	r.admin.registerRuns()
 	return r, f
@@ -290,5 +320,59 @@ func TestRunListSearchAndKeyFilterAreValidatedAndPassedDown(t *testing.T) {
 	}
 	if code, _ := r.json(t, "GET", "/admin/runs?q="+strings.Repeat("x", 101), tok, ""); code != 400 {
 		t.Errorf("long search: %d", code)
+	}
+}
+
+func TestRunGraphEndpoint(t *testing.T) {
+	r, f := newRunsAdminRig(t)
+	tok := r.token(t, "viewer", "viewer-password")
+	id := f.items[0].ID.String()
+	code, body := r.json(t, "GET", "/admin/runs/"+id+"/graph", tok, "")
+	if code != 200 || body["last_event_id"].(float64) != 7 || len(body["nodes"].([]any)) != 1 || body["run"].(map[string]any)["goal"] != "goal 0" {
+		t.Fatalf("%d %v", code, body)
+	}
+	for _, p := range []string{uuid.NewString(), "nope"} {
+		if code, _ := r.json(t, "GET", "/admin/runs/"+p+"/graph", tok, ""); code != 404 {
+			t.Errorf("%s: %d", p, code)
+		}
+	}
+	if code, _ := r.json(t, "GET", "/admin/runs/"+id+"/graph", "", ""); code != 401 {
+		t.Errorf("no token: %d", code)
+	}
+}
+
+func TestAdminRunEventsStream(t *testing.T) {
+	old1, old2 := sseHeartbeat, ssePoll
+	sseHeartbeat, ssePoll = time.Hour, 20*time.Millisecond
+	t.Cleanup(func() { sseHeartbeat, ssePoll = old1, old2 })
+	r, f := newRunsAdminRig(t)
+	id := f.items[0].ID
+	f.steps[id] = []runs.Step{mkStep(1, 1, runs.ModelCall, runs.PhaseStarted), mkStep(2, 1, runs.ModelCall, runs.PhaseFinished), statusStep(3, runs.Succeeded)}
+	tok := r.token(t, "viewer", "viewer-password")
+
+	resp := r.do(t, "GET", "/admin/runs/"+id.String()+"/events?after=1", tok, "")
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("%d %q", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	body, _ := io.ReadAll(resp.Body) // the stream ends by itself after the final run.status
+	got := string(body)
+	if strings.Contains(got, "id: 1\n") || !strings.Contains(got, "id: 2\nevent: step.finished") || !strings.Contains(got, "id: 3\nevent: run.status") {
+		t.Errorf("stream = %q", got)
+	}
+	// The run is over and the client has everything: it ends at once.
+	f.items[0].Status = runs.Succeeded
+	resp2 := r.do(t, "GET", "/admin/runs/"+id.String()+"/events", tok, "")
+	defer resp2.Body.Close()
+	if b, _ := io.ReadAll(resp2.Body); !strings.Contains(string(b), "id: 3\n") {
+		t.Errorf("full replay = %q", b)
+	}
+	for path, want := range map[string]int{"/admin/runs/" + uuid.NewString() + "/events": 404, "/admin/runs/nope/events": 404, "/admin/runs/" + id.String() + "/events?after=x": 400} {
+		if resp := r.do(t, "GET", path, tok, ""); resp.StatusCode != want {
+			t.Errorf("%s: %d, want %d", path, resp.StatusCode, want)
+		}
+	}
+	if resp := r.do(t, "GET", "/admin/runs/"+id.String()+"/events", "", ""); resp.StatusCode != 401 {
+		t.Errorf("no token: %d", resp.StatusCode)
 	}
 }

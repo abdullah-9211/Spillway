@@ -447,6 +447,42 @@ paths:
               schema: { $ref: "#/components/schemas/RunItem" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /admin/runs/{id}/graph:
+    get:
+      operationId: runGraph
+      summary: The run as a graph of attempts, with workers and recoveries
+      description: One node per attempt at a step, so a step re-issued after a worker was lost appears once per attempt.
+      x-access: viewer
+      security: [{ bearer: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The graph
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RunGraph" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /admin/runs/{id}/events:
+    get:
+      operationId: runEvents
+      summary: The run's step rows as server-sent events
+      description: Replays rows after Last-Event-ID (or ?after=), then streams live ones, and ends after the final run.status event.
+      x-access: viewer
+      security: [{ bearer: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: after, in: query, required: false, schema: { type: integer, format: int64, minimum: 0 } }
+      responses:
+        "200":
+          description: An event stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /admin/runs/{id}/cancel:
     post:
       operationId: runCancel
@@ -911,3 +947,93 @@ components:
             max_cost_usd: { type: number }
             deadline_seconds: { type: integer, minimum: 1 }
         metadata: { type: object }
+    GraphAttempt:
+      type: object
+      required: [provider, model, kind, latency_ms]
+      properties:
+        provider: { type: string }
+        model: { type: string }
+        kind: { type: string }
+        latency_ms: { type: integer }
+        status: { type: integer }
+        error: { type: string }
+        error_kind: { type: string }
+        injected: { type: boolean }
+        estimated: { type: boolean }
+    GraphNode:
+      type: object
+      required: [step_no, type, state, worker, epoch, reissued, started_at, duration_ms, cost_usd, attempts]
+      properties:
+        step_no: { type: integer }
+        type: { type: string, enum: [model_call, tool_call, wait_human, sleep, compaction] }
+        state: { type: string, enum: [finished, failed, running, stopped] }
+        worker: { type: string }
+        epoch: { type: integer, format: int64 }
+        reissued: { type: boolean }
+        previous_worker: { type: string }
+        previous_epoch: { type: integer, format: int64 }
+        started_at: { type: string, format: date-time }
+        duration_ms: { type: integer, format: int64, nullable: true, description: Null for an attempt that stopped }
+        cost_usd: { type: string }
+        tool: { type: string }
+        model: { type: string }
+        provider: { type: string }
+        cache: { type: string }
+        tokens:
+          type: object
+          required: [in, out]
+          properties: { in: { type: integer }, out: { type: integer } }
+        idempotency_key: { type: string }
+        attempts: { type: array, items: { $ref: "#/components/schemas/GraphAttempt" } }
+        arguments: { type: string }
+        result: { type: string }
+        message: { type: string }
+        error: { type: string }
+    RunGraph:
+      type: object
+      required: [run, workers, nodes, recoveries, last_event_id]
+      properties:
+        run:
+          type: object
+          required: [id, status, goal, key, model, tools, step_count, cost_usd, max_steps, max_cost_usd, deadline_seconds, created_at, finished_at, deadline_at, failure_reason, cancel_requested, lease_owner, lease_epoch, lease_expires_at]
+          properties:
+            id: { type: string, format: uuid }
+            status: { type: string, enum: [queued, running, waiting_tool, waiting_human, sleeping, succeeded, failed, cancelled] }
+            goal: { type: string }
+            key: { type: string }
+            model: { type: string }
+            tools: { type: array, items: { type: string } }
+            step_count: { type: integer }
+            cost_usd: { type: string }
+            max_steps: { type: integer }
+            max_cost_usd: { type: string }
+            deadline_seconds: { type: integer }
+            created_at: { type: string, format: date-time }
+            finished_at: { type: string, format: date-time, nullable: true }
+            deadline_at: { type: string, format: date-time }
+            failure_reason: { type: string, nullable: true }
+            cancel_requested: { type: boolean }
+            lease_owner: { type: string, nullable: true }
+            lease_epoch: { type: integer, format: int64 }
+            lease_expires_at: { type: string, format: date-time, nullable: true }
+        workers:
+          type: array
+          items:
+            type: object
+            required: [id, epochs]
+            properties:
+              id: { type: string }
+              epochs: { type: array, items: { type: integer, format: int64 } }
+        nodes: { type: array, items: { $ref: "#/components/schemas/GraphNode" } }
+        recoveries:
+          type: array
+          items:
+            type: object
+            required: [after_step, from_worker, to_worker, epoch, at]
+            properties:
+              after_step: { type: integer }
+              from_worker: { type: string }
+              to_worker: { type: string }
+              epoch: { type: integer, format: int64 }
+              at: { type: string, format: date-time }
+        last_event_id: { type: integer, format: int64, description: The id of the newest step row; events after it are new }

@@ -756,9 +756,9 @@ Two slices, each backend then frontend.
 - Frontend: open Runs while a handful of runs execute and watch cards appear, strips grow and runs move to Earlier; the Needs you card appears for a run that needs approval (its Review button opens the run page; the approve controls arrive in Phase 12); both themes; viewer.
 
 ### Phase 11: run graph and timeline
-- [ ] **BE** `GET /admin/runs/{id}/graph` (section 6.3), the admin events endpoint, cancel.
+- [x] **BE** `GET /admin/runs/{id}/graph` (section 6.3), the admin events endpoint, cancel.
 - [ ] **BE tests:** graph derivation from fixtures: no recovery, one, two recoveries, fallback attempts, a running step, a step reissued twice.
-- [ ] **FE** `layoutGraph()` with unit tests first, then `RunGraph`, the worker bands and cut line, the step inspector, the Graph and Timeline toggle, live node updates from the SSE stream, and the Cancel run button.
+- [x] **FE** `layoutGraph()` with unit tests first, then `RunGraph`, the worker bands and cut line, the step inspector, the Graph and Timeline toggle, live node updates from the SSE stream, and the Cancel run button.
 - [ ] **FE tests:** `layoutGraph` unit and snapshot tests for each of those fixtures; the SSE reducer; `vitest-axe`; one basic smoke check that the graph page loads. The kill-the-worker demo is checked by you in the verify step, not by a browser test.
 
 **Verify with me**
@@ -825,5 +825,7 @@ These are the places where this document makes a call the spec left open or phra
 24. **The activity chart has a fourth colour for cancelled runs**, so every run started in a slice is drawn.
 25. **The dashboard can start and cancel runs (added after Phase 10).** `POST /admin/runs` and `POST /admin/runs/{id}/cancel` are admin-only. A person at the dashboard has no API key secret, so a run started there is made under the built-in playground key and counts against its budget and rate limit; cancel works on any run. Tools are not offered from the dashboard until the registry has endpoints (Phase 12).
 26. **The Runs page filters on the server and sorts what is loaded.** Search (case-insensitive, on the task text), status and API key narrow the lists in the Go service and page with a keyset cursor; the order (longest, most expensive, most steps) applies to the runs already loaded, and the page says so, because keyset paging needs one fixed order.
+27. **The run page reads the graph again when a row arrives, rather than applying rows to a client store (Phase 11).** The Go service derives the graph, so the browser never re-implements the derivation rules; each stream event only says the graph is stale. Rows are de-duplicated by id, the stream resumes from Last-Event-ID, and the page falls back to polling every 3 s if the browser gives up on the connection.
+28. **`GET /admin/runs/{id}/events` is the admin twin of the public stream**, open to both roles because it only reads. Node details (`arguments`, `result`, `message`, `error`) are cut to 2,000 characters in the graph payload.
 13. **The tool registry has no screen** in the final design, so Phase 12 manages tools through the API and CLI. Adding a screen needs a design first.
 8. **MCP idempotency** depends on the server honouring `spillway/idempotencyKey`. Exactly-once for side effects is guaranteed only for receivers that deduplicate by key; the chaos test measures that against a receiver that does.

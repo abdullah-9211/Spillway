@@ -291,7 +291,7 @@ func TestRoleMatrixFromTheRouter(t *testing.T) {
 	viewer := r.token(t, "viewer", "viewer-password")
 
 	routes := r.admin.Routes()
-	if len(routes) < 22 {
+	if len(routes) < 24 {
 		t.Fatalf("expected the real routes plus the two above, got %v", routes)
 	}
 	// "allowed" means the request got past the session and role checks: whatever the handler then says about a
@@ -341,7 +341,7 @@ func TestProductionRoutesAreAllDeclared(t *testing.T) {
 	}
 	sort.Strings(got)
 	want := []string{
-		"DELETE /admin/keys/{id} admin", "GET /admin/keys viewer", "GET /admin/me viewer", "GET /admin/models viewer", "GET /admin/playground viewer", "GET /admin/playground/history viewer", "GET /admin/runs viewer", "GET /admin/runs/activity viewer", "GET /admin/runs/summary viewer", "GET /admin/runs/{id} viewer", "GET /admin/status viewer",
+		"DELETE /admin/keys/{id} admin", "GET /admin/keys viewer", "GET /admin/me viewer", "GET /admin/models viewer", "GET /admin/playground viewer", "GET /admin/playground/history viewer", "GET /admin/runs viewer", "GET /admin/runs/activity viewer", "GET /admin/runs/summary viewer", "GET /admin/runs/{id} viewer", "GET /admin/runs/{id}/events viewer", "GET /admin/runs/{id}/graph viewer", "GET /admin/status viewer",
 		"GET /admin/usage/export.csv viewer", "GET /admin/usage/requests viewer", "GET /admin/usage/summary viewer",
 		"PATCH /admin/keys/{id} admin", "POST /admin/keys admin", "POST /admin/login public", "POST /admin/playground/chat admin", "POST /admin/runs admin", "POST /admin/runs/{id}/cancel admin",
 	}

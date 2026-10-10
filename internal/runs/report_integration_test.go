@@ -320,3 +320,68 @@ func newEnvKey(t *testing.T, e *env, name string) uuid.UUID {
 	}
 	return id
 }
+
+func TestReaderGraphAfterARealCrashAndRecovery(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	rd := NewReader(e.pool)
+	run := e.create(t, "", Request{Input: Input{Text: "Research pricing"}, Tools: nil}, t0)
+
+	// w-a claims, does a model call (with a usage row that shows a fallback), starts a tool call and is killed.
+	a, _ := e.store.Claim(ctx, "w-a", 30*time.Second, t0)
+	la := e.store.Log(Lease{RunID: a.ID, Owner: "w-a", Epoch: a.LeaseEpoch}, func() time.Time { return t0.Add(time.Second) })
+	usageID := uuid.New()
+	if _, err := e.pool.Exec(ctx, `INSERT INTO usage (id, api_key_id, run_id, policy, provider, model, latency_ms, cache_status, outcome, attempts, created_at)
+		VALUES ($1,$2,$3,'default','anthropic','sonnet',2900,'miss','ok',$4,$5)`, usageID, e.key.ID, run.ID,
+		`[{"provider":"openai","model":"mini","kind":"primary","status":503,"error_kind":"server","latency_ms":340},{"provider":"anthropic","model":"sonnet","kind":"fallback","latency_ms":2560}]`, t0); err != nil {
+		t.Fatal(err)
+	}
+	must := func(_ Step, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(la.Append(ctx, NewStep{StepNo: ptr(1), Type: ModelCall, Phase: PhaseStarted, Payload: ModelStarted{Policy: "default"}}))
+	must(la.Append(ctx, NewStep{StepNo: ptr(1), Type: ModelCall, Phase: PhaseFinished, Cost: 7100, Payload: ModelFinished{Message: calls("c1"), Provider: "anthropic", Model: "sonnet", UsageID: usageID.String()}}))
+	must(la.Append(ctx, NewStep{StepNo: ptr(2), Type: ToolCall, Phase: PhaseStarted, Key: IdempotencyKey(run.ID, 2), Payload: ToolStarted{Tool: "fetch_page", Arguments: json.RawMessage(`{"url":"https://x"}`), ToolCallID: "c1"}}))
+
+	// w-b takes over after the lease expires and re-issues step 2, which finishes.
+	b, _ := e.store.Claim(ctx, "w-b", 30*time.Second, t0.Add(40*time.Second))
+	lb := e.store.Log(Lease{RunID: b.ID, Owner: "w-b", Epoch: b.LeaseEpoch}, func() time.Time { return t0.Add(41 * time.Second) })
+	must(lb.Append(ctx, NewStep{StepNo: ptr(2), Type: ToolCall, Phase: PhaseReissued, Key: IdempotencyKey(run.ID, 2), Payload: Reissued{PreviousWorker: "w-a", PreviousEpoch: 1}}))
+	must(lb.Append(ctx, NewStep{StepNo: ptr(2), Type: ToolCall, Phase: PhaseFinished, Key: IdempotencyKey(run.ID, 2), Payload: ToolFinished{Result: "page text"}}))
+	must(lb.Append(ctx, NewStep{StepNo: ptr(3), Type: ModelCall, Phase: PhaseStarted, Payload: ModelStarted{}}))
+
+	g, err := rd.Graph(ctx, run.ID, t0.Add(45*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, n := range g.Nodes {
+		got = append(got, fmt.Sprintf("%d/%s/e%d/%s/%v", n.StepNo, n.Worker, n.Epoch, n.State, n.Reissued))
+	}
+	want := "[1/w-a/e1/finished/false 2/w-a/e1/stopped/false 2/w-b/e2/finished/true 3/w-b/e2/running/false]"
+	if fmt.Sprint(got) != want {
+		t.Fatalf("nodes = %v, want %s", got, want)
+	}
+	if len(g.Recoveries) != 1 || g.Recoveries[0].FromWorker != "w-a" || g.Recoveries[0].ToWorker != "w-b" || g.Recoveries[0].AfterStep != 2 || g.Recoveries[0].Epoch != 2 {
+		t.Errorf("recoveries = %+v", g.Recoveries)
+	}
+	first := g.Nodes[0]
+	if len(first.Attempts) != 2 || first.Attempts[0].Status != 503 || first.Cache != "miss" || first.CostUSD != "0.007100" {
+		t.Errorf("the model call carries its fallback from the usage row: %+v", first)
+	}
+	if g.Nodes[1].IdempotencyKey != g.Nodes[2].IdempotencyKey || g.Nodes[1].IdempotencyKey == "" || g.Nodes[2].PreviousWorker != "w-a" {
+		t.Errorf("the re-issue shares the key: %+v / %+v", g.Nodes[1], g.Nodes[2])
+	}
+	if g.Run.Goal != "Research pricing" || g.Run.Key != "runs-test" || g.Run.MaxSteps != 50 || g.Run.LeaseEpoch != 2 || g.Run.LeaseOwner == nil || *g.Run.LeaseOwner != "w-b" || g.LastEvent == 0 {
+		t.Errorf("run = %+v last=%d", g.Run, g.LastEvent)
+	}
+	if g.Run.StepCount != 3 {
+		t.Errorf("step count = %d", g.Run.StepCount)
+	}
+	if _, err := rd.Graph(ctx, uuid.New(), t0); err != ErrNotFound {
+		t.Errorf("unknown run: %v", err)
+	}
+}

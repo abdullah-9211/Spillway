@@ -295,6 +295,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/runs/{id}/graph": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The run as a graph of attempts, with workers and recoveries
+         * @description One node per attempt at a step, so a step re-issued after a worker was lost appears once per attempt.
+         */
+        get: operations["runGraph"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/runs/{id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The run's step rows as server-sent events
+         * @description Replays rows after Last-Event-ID (or ?after=), then streams live ones, and ends after the final run.status event.
+         */
+        get: operations["runEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/runs/{id}/cancel": {
         parameters: {
             query?: never;
@@ -709,6 +749,102 @@ export interface components {
                 deadline_seconds?: number;
             };
             metadata?: Record<string, never>;
+        };
+        GraphAttempt: {
+            provider: string;
+            model: string;
+            kind: string;
+            latency_ms: number;
+            status?: number;
+            error?: string;
+            error_kind?: string;
+            injected?: boolean;
+            estimated?: boolean;
+        };
+        GraphNode: {
+            step_no: number;
+            /** @enum {string} */
+            type: "model_call" | "tool_call" | "wait_human" | "sleep" | "compaction";
+            /** @enum {string} */
+            state: "finished" | "failed" | "running" | "stopped";
+            worker: string;
+            /** Format: int64 */
+            epoch: number;
+            reissued: boolean;
+            previous_worker?: string;
+            /** Format: int64 */
+            previous_epoch?: number;
+            /** Format: date-time */
+            started_at: string;
+            /**
+             * Format: int64
+             * @description Null for an attempt that stopped
+             */
+            duration_ms: number | null;
+            cost_usd: string;
+            tool?: string;
+            model?: string;
+            provider?: string;
+            cache?: string;
+            tokens?: {
+                in: number;
+                out: number;
+            };
+            idempotency_key?: string;
+            attempts: components["schemas"]["GraphAttempt"][];
+            arguments?: string;
+            result?: string;
+            message?: string;
+            error?: string;
+        };
+        RunGraph: {
+            run: {
+                /** Format: uuid */
+                id: string;
+                /** @enum {string} */
+                status: "queued" | "running" | "waiting_tool" | "waiting_human" | "sleeping" | "succeeded" | "failed" | "cancelled";
+                goal: string;
+                key: string;
+                model: string;
+                tools: string[];
+                step_count: number;
+                cost_usd: string;
+                max_steps: number;
+                max_cost_usd: string;
+                deadline_seconds: number;
+                /** Format: date-time */
+                created_at: string;
+                /** Format: date-time */
+                finished_at: string | null;
+                /** Format: date-time */
+                deadline_at: string;
+                failure_reason: string | null;
+                cancel_requested: boolean;
+                lease_owner: string | null;
+                /** Format: int64 */
+                lease_epoch: number;
+                /** Format: date-time */
+                lease_expires_at: string | null;
+            };
+            workers: {
+                id: string;
+                epochs: number[];
+            }[];
+            nodes: components["schemas"]["GraphNode"][];
+            recoveries: {
+                after_step: number;
+                from_worker: string;
+                to_worker: string;
+                /** Format: int64 */
+                epoch: number;
+                /** Format: date-time */
+                at: string;
+            }[];
+            /**
+             * Format: int64
+             * @description The id of the newest step row; events after it are new
+             */
+            last_event_id: number;
         };
     };
     responses: {
@@ -1348,6 +1484,57 @@ export interface operations {
                     "application/json": components["schemas"]["RunItem"];
                 };
             };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    runGraph: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The graph */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunGraph"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    runEvents: {
+        parameters: {
+            query?: {
+                after?: number;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description An event stream */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": string;
+                };
+            };
+            400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
         };

@@ -153,6 +153,12 @@ func serve(ctx context.Context, args []string, getenv func(string) string, errOu
 		}
 
 		if cfg.Role != "worker" {
+			broker := runs.NewBroker(pg.Pool, log)
+			brokerDone = make(chan struct{})
+			go func() {
+				defer close(brokerDone)
+				broker.Run(ctx)
+			}()
 			var admin *api.Admin
 			if secret := getenv("ADMIN_SESSION_SECRET"); secret == "" {
 				log.Warn("admin API off: ADMIN_SESSION_SECRET is not set, so the dashboard cannot sign in")
@@ -171,8 +177,8 @@ func serve(ctx context.Context, args []string, getenv func(string) string, errOu
 				}
 				pg_ := playground.NewService(gw, func(context.Context) (keys.Key, error) { return pkey, nil }, playground.NewStore(pg.Pool), cat.Playground.FaultInjection, log)
 				admin = api.NewAdmin(api.AdminDeps{Users: auth.NewUsers(pg.Pool, auth.DefaultParams), Keys: keyStore, Usage: usage.NewReader(pg.Pool), Health: gw.ProviderHealth, Latency: metrics,
-					Runs: runs.NewReader(pg.Pool),
-					RunStarter: starter{c: &runs.Creator{Store: runStore, Key: func(context.Context) (keys.Key, error) { return pkey, nil },
+					Runs:   runs.NewReader(pg.Pool),
+					Events: broker, RunStarter: starter{c: &runs.Creator{Store: runStore, Key: func(context.Context) (keys.Key, error) { return pkey, nil },
 						Caps: runs.Caps{MaxSteps: cat.Runs.MaxSteps, MaxCost: cat.Runs.MaxCost, Deadline: cat.Runs.Deadline}, Known: cat.Has}, s: runStore},
 					Playground: &api.PlaygroundDeps{Service: pg_, Catalog: gw.Catalog, Key: func(ctx context.Context, now time.Time) (keys.Stats, error) { return keyStore.Stats(ctx, pkey.ID, now) }},
 					Signer:     signer, Deps: deps, Log: log})
@@ -182,12 +188,6 @@ func serve(ctx context.Context, args []string, getenv func(string) string, errOu
 			if err != nil {
 				return fmt.Errorf("listen: %w", err)
 			}
-			broker := runs.NewBroker(pg.Pool, log)
-			brokerDone = make(chan struct{})
-			go func() {
-				defer close(brokerDone)
-				broker.Run(ctx)
-			}()
 			handler := api.NewHandler(api.Options{Deps: deps, Gateway: gw, Auth: keyStore, Log: log, Metrics: metrics.Handler(), Admin: admin,
 				Runs: &api.RunsOptions{Store: runStore, Caps: runs.Caps{MaxSteps: cat.Runs.MaxSteps, MaxCost: cat.Runs.MaxCost, Deadline: cat.Runs.Deadline}, Known: cat.Has, ToolsReady: true, MissingTools: toolStore.Missing, Events: broker}})
 			// Event streams last as long as the client stays; shutting down ends them, or Shutdown would wait for them.

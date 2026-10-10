@@ -52,6 +52,8 @@ type AdminDeps struct {
 	Runs RunsAdmin
 	// RunStarter, when set with Runs, adds POST /admin/runs and POST /admin/runs/{id}/cancel (admin only).
 	RunStarter RunStarter
+	// Events, when set with Runs, adds GET /admin/runs/{id}/events (server-sent events).
+	Events Events
 	// Now is the clock for run reads; tests set it. Zero means time.Now.
 	Now func() time.Time
 	// Health and Latency feed the provider-health and added-latency parts of the usage summary.

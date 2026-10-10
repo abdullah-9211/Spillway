@@ -386,3 +386,8 @@ func DecodeCursor(s string) (Cursor, error) {
 func likeEscape(s string) string {
 	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }
+
+// Steps returns a run's rows after a cursor, oldest first; limit <= 0 means all of them.
+func (rd *Reader) Steps(ctx context.Context, run uuid.UUID, after int64, limit int) ([]Step, error) {
+	return (&Store{pool: rd.pool}).Steps(ctx, run, after, limit)
+}

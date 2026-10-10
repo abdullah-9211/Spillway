@@ -111,6 +111,26 @@ for (const [label, who, role] of [["admin", admin, "admin"], ["viewer", viewer, 
   const bad = await fetch(base + "/runs/not-a-run-id", { headers: { cookie } });
   check(`${label} gets a 404 for a run that does not exist`, bad.status === 404, `status ${bad.status}`);
 
+  const listed = (await (await fetch(base + "/api/runs/snapshot?hours=168", { headers: { cookie } })).json()) as { finished?: { id: string }[]; active?: { id: string }[] };
+  const anyRun = listed.finished?.[0]?.id ?? listed.active?.[0]?.id;
+  if (anyRun) {
+    const page = await fetch(base + `/runs/${anyRun}`, { headers: { cookie } });
+    const html = await page.text();
+    check(`${label} opens a run's graph`, page.status === 200 && html.includes("Run graph") && html.includes("Run totals"), `status ${page.status}`);
+    const view = await fetch(base + `/runs/${anyRun}?view=timeline`, { headers: { cookie } });
+    check(`${label} opens the timeline view`, view.status === 200 && (await view.text()).includes("Timeline"));
+    const g = await fetch(base + `/api/runs/${anyRun}/graph`, { headers: { cookie } });
+    const gj = (await g.json()) as { nodes?: unknown[]; run?: { id?: string } };
+    check(`${label} reads the graph`, g.status === 200 && Array.isArray(gj.nodes) && gj.run?.id === anyRun, `status ${g.status}`);
+    const ev = await fetch(base + `/api/runs/${anyRun}/events?after=0`, { headers: { cookie } });
+    check(`${label} can open the event stream`, ev.status === 200 && (ev.headers.get("content-type") ?? "").includes("text/event-stream"), `status ${ev.status}`);
+    await ev.body?.cancel();
+    if (label === "viewer") {
+      const c = await fetch(base + `/api/runs/${anyRun}/cancel`, { method: "POST", headers: { cookie } });
+      check("viewer cannot cancel a run (403)", c.status === 403, `status ${c.status}`);
+    }
+  }
+
   const pg = await fetch(base + "/playground", { headers: { cookie } });
   const pgHtml = await pg.text();
   const sendDisabled = /<button[^>]*disabled[^>]*>Send</.test(pgHtml);
