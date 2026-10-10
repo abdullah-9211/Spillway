@@ -112,6 +112,15 @@ export function GraphCanvas({ layout, selected, onSelect }: { layout: Layout; se
                 <span>{c.text}</span>
               </div>
             ))}
+            {layout.end && (
+              <div className={`gn end ${layout.end.state}`} style={{ left: layout.end.x, top: layout.end.y, width: layout.end.w, height: layout.end.h }} role="note" aria-label={layout.end.tip} title={layout.end.tip}>
+                <span className="gt">
+                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true"><path d={layout.end.state === "failed" ? "M3 3l6 6M9 3l-6 6" : "M3 6h6"} /></svg>
+                </span>
+                <span className="gname">{layout.end.label}</span>
+                <span className="gm" style={{ ["--c" as string]: "var(--fail)" }}>{layout.end.meta}</span>
+              </div>
+            )}
             {layout.nodes.map((n, i) => (
               <GraphNodeButton key={n.id} n={n} index={i} longest={longest} selected={selected === n.id} onSelect={onSelect} />
             ))}

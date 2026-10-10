@@ -1016,3 +1016,8 @@ div.card.live.wait { border-color: var(--wait); animation: nodein 0.4s ease-out 
 .newrun__tools li.on { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .newrun__tools label { display: inline-flex; gap: 8px; align-items: center; cursor: pointer; }
 .newrun__ask { margin-left: auto; color: var(--wait); font-size: 13px; }
+
+.ge--end { background: var(--fail); }
+.gn.end { border: 1.5px solid var(--fail); border-radius: 40px; align-items: center; justify-content: center; text-align: center; background: color-mix(in srgb, var(--fail) 8%, var(--panel)); color: var(--fail); }
+.gn.end.cancelled { border-color: var(--subtle); color: var(--mute); background: var(--panel); }
+.gn.end .gname { font-weight: 600; }

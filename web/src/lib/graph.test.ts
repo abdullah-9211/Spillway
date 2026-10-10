@@ -155,3 +155,19 @@ describe("words and numbers around the graph", () => {
     expect([0, 1, 3].map(recoveredLabel)).toEqual(["no recoveries", "recovered once", "recovered 3 times"]);
   });
 });
+
+describe("where a run that did not succeed ended", () => {
+  const base = { run: { status: "failed", failure_reason: "rejected" }, nodes: [], workers: [], recoveries: [] } as unknown as RunGraph;
+  it("adds an end marker with the reason, after the last step", () => {
+    const g = { ...base, nodes: [{ step_no: 1, type: "model_call", state: "finished", worker: "w", epoch: 1, reissued: false, started_at: "2026-10-09T12:00:00Z", duration_ms: 5, cost_usd: "0", attempts: [] }] } as unknown as RunGraph;
+    const l = layoutGraph(g);
+    const last = l.nodes[l.nodes.length - 1];
+    expect(l.end).toMatchObject({ state: "failed", label: "Run failed", meta: "rejected" });
+    expect(l.end!.x).toBeGreaterThan(last.x + last.w);
+    expect(l.edges.some((e) => e.id === "eend" && e.kind === "end")).toBe(true);
+  });
+  it("has none for a run that succeeded or is still going", () => {
+    expect(layoutGraph({ ...base, run: { status: "succeeded", failure_reason: null } } as unknown as RunGraph).end).toBeNull();
+    expect(layoutGraph({ ...base, run: { status: "waiting_human", failure_reason: null } } as unknown as RunGraph).end).toBeNull();
+  });
+});

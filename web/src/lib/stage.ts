@@ -100,7 +100,7 @@ export function workerCards(g: RunGraph, now: Date): WorkerCard[] {
       return { id: w.id, epochs: w.epochs, state: "holding" as const, note: left > 0 ? `lease renews, expires in ${shortSpan(left)}` : "holds the run" };
     }
     if (lastNodeOf?.state === "stopped" || (!isCurrent && g.workers.length > 1)) return { id: w.id, epochs: w.epochs, state: "stopped" as const, note: "lost: its lease expired" };
-    return { id: w.id, epochs: w.epochs, state: "done" as const, note: isCurrent ? "finished the run" : "released the run" };
+    return { id: w.id, epochs: w.epochs, state: "done" as const, note: isCurrent ? (g.run.status === "succeeded" ? "finished the run" : "was holding it when it ended") : "released the run" };
   });
 }
 

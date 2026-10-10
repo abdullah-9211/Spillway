@@ -61,12 +61,16 @@ export type LayoutNode = {
   node: GraphNode | null;
 };
 
-export type LayoutEdge = { id: string; kind: "done" | "run" | "redo"; x: number; y: number; w: number; h: number; dashed: boolean };
+export type LayoutEdge = { id: string; kind: "done" | "run" | "redo" | "end"; x: number; y: number; w: number; h: number; dashed: boolean };
 export type LayoutBand = { id: string; x: number; w: number; tint: "base" | "recovered"; label: string; labelX: number };
 export type LayoutCut = { id: string; x: number; label: string; afterStep: number };
 export type LayoutChip = { id: string; x: number; y: number; w: number; h: number; text: string; nodeId: string };
 
+/** Where a run that did not succeed ended, and why. A failure with no failed step (a rejection, a limit) shows here. */
+export type LayoutEnd = { x: number; y: number; w: number; h: number; state: "failed" | "cancelled"; label: string; meta: string; tip: string };
+
 export type Layout = {
+  end: LayoutEnd | null;
   width: number;
   height: number;
   nodes: LayoutNode[];
@@ -135,7 +139,7 @@ function failedFirst(n: GraphNode): GraphAttempt | null {
  */
 export function layoutGraph(g: Pick<RunGraph, "run" | "nodes" | "workers" | "recoveries">): Layout {
   const { nodeW: NW, nodeH: NH, colStep: STEP, leftGutter: X0, recoveryShift: SHIFT } = GEO;
-  const out: Layout = { width: 0, height: GEO.height, nodes: [], edges: [], bands: [], cuts: [], chips: [], stubs: [] };
+  const out: Layout = { end: null, width: 0, height: GEO.height, nodes: [], edges: [], bands: [], cuts: [], chips: [], stubs: [] };
 
   // Which attempts begin a new recovery segment.
   const shiftAt: number[] = [];
@@ -195,7 +199,18 @@ export function layoutGraph(g: Pick<RunGraph, "run" | "nodes" | "workers" | "rec
   }
 
   const last = out.nodes[out.nodes.length - 1];
-  out.width = Math.max(GEO.minWidth, last.x + NW + GEO.rightMargin);
+  const st = g.run.status;
+  if (st === "failed" || st === "cancelled") {
+    const reason = (g.run.failure_reason ?? "").replace(/_/g, " ");
+    const x = last.x + STEP;
+    const y = last.y;
+    out.end = {
+      x, y, w: NW, h: NH, state: st, label: st === "failed" ? "Run failed" : "Cancelled", meta: reason || (st === "failed" ? "failed" : "cancelled"),
+      tip: st === "failed" ? `The run failed${reason ? `: ${reason}` : ""}` : "The run was cancelled",
+    };
+    out.edges.push({ id: "eend", kind: "end", x: last.x + NW, y: y + NH / 2 - 1, w: x - (last.x + NW), h: 2, dashed: false });
+  }
+  out.width = Math.max(GEO.minWidth, (out.end ? out.end.x : last.x) + NW + GEO.rightMargin);
 
   // Cuts sit in the gap before the first attempt after a recovery; bands run between them.
   const gap = (STEP - NW + SHIFT) / 2;
