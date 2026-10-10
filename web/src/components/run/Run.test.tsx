@@ -7,6 +7,18 @@ import type { GraphNode, RunGraph } from "@/lib/graph";
 import { RoleProvider } from "@/lib/role";
 import { RunPage } from "./RunPage";
 
+// The three.js stage needs WebGL, which jsdom does not have. The stand-in shows what it was told, and lets a test click a crystal.
+vi.mock("./RunStage", () => ({
+  STAGE_H: 280,
+  RunStage: ({ layout, replayAt, selected, onSelect, onHover }: { layout: { nodes: { id: string; tip: string }[] }; replayAt: number | null; selected: string | null; onSelect: (id: string) => void; onHover: (h: { id: string; x: number; y: number } | null) => void }) => (
+    <div data-testid="stage" data-replay={replayAt === null ? "live" : String(replayAt)} data-selected={selected ?? ""}>
+      {layout.nodes.filter((n) => n.id !== "goal").map((n) => (
+        <button key={n.id} type="button" data-stage-node={n.id} onClick={() => onSelect(n.id)} onPointerEnter={() => onHover({ id: n.id, x: 10, y: 10 })} onPointerLeave={() => onHover(null)} aria-label={`${n.id} in the scene`} />
+      ))}
+    </div>
+  ),
+}));
+
 class FakeES {
   static all: FakeES[] = [];
   static CLOSED = 2;
@@ -216,5 +228,110 @@ describe("live updates", () => {
       await vi.advanceTimersByTimeAsync(3500);
     });
     await waitFor(() => expect(f).toHaveBeenCalled());
+  });
+});
+
+
+describe("the live stage", () => {
+  const up = () => userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+
+  it("shows the stage with the run's nodes, and clicking one in the scene selects that step", async () => {
+    const u = up();
+    show(recovered);
+    expect(screen.getByRole("region", { name: "Live stage" })).toBeInTheDocument();
+    await u.click(screen.getByRole("button", { name: "3:1 in the scene" }));
+    expect(screen.getByTestId("stage")).toHaveAttribute("data-selected", "3:1");
+    expect(screen.getByRole("region", { name: "Selected step" })).toHaveTextContent("Step 3, model call");
+  });
+
+  it("hovering a node shows what it is", async () => {
+    const u = up();
+    show(recovered);
+    await u.hover(screen.getByRole("button", { name: "4:1 in the scene" }));
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Step 4, tool call, stopped, on w-2");
+    await u.unhover(screen.getByRole("button", { name: "4:1 in the scene" }));
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+  });
+
+  it("replays the run: plays, pauses, scrubs, and goes back to live", async () => {
+    const u = up();
+    show(recovered);
+    expect(screen.getByTestId("stage")).toHaveAttribute("data-replay", "live");
+    await u.click(screen.getByRole("button", { name: "Replay this run" }));
+    expect(screen.getByTestId("stage")).toHaveAttribute("data-replay", "0");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const at = Number(screen.getByTestId("stage").getAttribute("data-replay"));
+    expect(at).toBeGreaterThan(500);
+    await u.click(screen.getByRole("button", { name: "Pause" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(Number(screen.getByTestId("stage").getAttribute("data-replay"))).toBe(at);
+    fireEventRange(screen.getByLabelText("Replay position"), 2000);
+    expect(screen.getByTestId("stage")).toHaveAttribute("data-replay", "2000");
+    await u.selectOptions(screen.getByLabelText("Replay speed"), "4");
+    await u.click(screen.getByRole("button", { name: "Back to live" }));
+    expect(screen.getByTestId("stage")).toHaveAttribute("data-replay", "live");
+    expect(screen.getByRole("button", { name: "Replay this run" })).toBeInTheDocument();
+  });
+
+  it("a replay that reaches the end offers to go again", async () => {
+    const u = up();
+    show(recovered);
+    await u.click(screen.getByRole("button", { name: "Replay this run" }));
+    await u.selectOptions(screen.getByLabelText("Replay speed"), "4");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(8000);
+    });
+    expect(screen.getByRole("button", { name: "Again" })).toBeInTheDocument();
+  });
+});
+
+function fireEventRange(el: HTMLElement, value: number) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+  act(() => {
+    setter?.call(el, String(value));
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
+describe("activity and workers", () => {
+  it("lists who holds the run and who was lost, and tells the story newest first", () => {
+    show(recovered);
+    const side = screen.getByRole("complementary", { name: "Workers and activity" });
+    expect(side).toHaveTextContent("w-2");
+    expect(side).toHaveTextContent("Lost");
+    expect(side).toHaveTextContent("lost: its lease expired");
+    expect(side).toHaveTextContent("w-4");
+    expect(side).toHaveTextContent("Holding the run");
+    const feed = within(side).getByRole("list", { name: "What has happened" });
+    const lines = within(feed).getAllByRole("listitem").map((l) => l.textContent ?? "");
+    expect(lines.some((l) => l.includes("w-4 took over from w-2 at lease epoch 3"))).toBe(true);
+    expect(lines.some((l) => l.includes("Step 4 stopped on w-2: the worker was lost"))).toBe(true);
+    expect(lines.at(-1)).toContain("Run created");
+  });
+
+  it("marks the moment a run ends in front of you, for a few seconds", async () => {
+    const final: RunGraph = { ...ended, last_event_id: 1900 };
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, json: async () => final })));
+    show(recovered);
+    const es = FakeES.all[0];
+    act(() => es.onopen?.());
+    act(() => es.emit("run.status", 1900, '{"type":"run_status","payload":{"status":"succeeded"}}'));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(screen.getByText("The run succeeded")).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(8000);
+    });
+    expect(screen.queryByText("The run succeeded")).not.toBeInTheDocument();
+  });
+
+  it("does not announce a run that was already over when the page opened", () => {
+    show(ended);
+    expect(screen.queryByText("The run succeeded")).not.toBeInTheDocument();
   });
 });
