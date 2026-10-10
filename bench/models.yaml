@@ -1,0 +1,11 @@
+# Catalog for the benchmark. The upstream is the fake provider, so latency is the gateway's alone.
+# Prices are ILLUSTRATIVE (a mid-priced model), only used to turn cache hits into a dollar figure.
+providers:
+  openai: { api_key_env: OPENAI_API_KEY, base_url: http://localhost:9990/v1 }
+models:
+  - { id: m1, provider: openai, upstream: bench-model, input_usd_per_mtok: 3.00, output_usd_per_mtok: 15.00, context_window: 128000, tags: [fast] }
+policies:
+  - { name: default, type: fixed, model: m1 }
+gateway: { request_timeout: 30s, first_byte_timeout: 10s, max_retries: 0 }
+cache: { exact_ttl: 24h, scope: key, semantic_threshold: 0.95 }
+runs: { lease_ttl: 30s, heartbeat: 10s, workers: 4, max_steps: 50, max_cost_usd: 1.0, deadline: 15m }

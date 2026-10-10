@@ -1,6 +1,6 @@
 # Spillway
 
-Spillway is an open-source durable agent runtime and multi-provider LLM gateway. A Go service does the work and a separate Next.js app in `web/` is the dashboard. Nothing is built yet: the repository holds the plan and the design only.
+Spillway is an open-source durable agent runtime and multi-provider LLM gateway. A Go service does the work and a separate Next.js app in `web/` is the dashboard. All twelve feature phases are built and verified; Phase 13 was done as evidence and documentation only (README, benchmarks, demo script, screenshots), with deployment packaging deferred.
 
 ## Read first
 

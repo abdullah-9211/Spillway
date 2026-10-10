@@ -777,15 +777,16 @@ Two slices, each backend then frontend.
 - Frontend: watch a run stop at the approval card in the dashboard, approve it, and see it continue in the graph; reject another and see it end with the reason; confirm a viewer sees the card but cannot decide; check the Needs you card on the Runs page; both themes.
 - **Open point.** The final design has no screen for the tool registry. This phase manages tools through the API and CLI. If you want a Tools screen, it needs a design first.
 
-### Phase 13: deploy, evidence, README
-- [ ] **BE** `Dockerfile` for the service and for `web/`; compose finalised (service, web, Postgres, Redis, optional Ollama); `docker compose up` quick start verified from a clean checkout.
-- [ ] **BE** k6 load test and cache replay test; fill the README results table with measured numbers and state the machine used.
-- [ ] **FE** Record the crash-recovery demo through the run graph for the README.
-- [ ] README per the spec's checklist, including Known limits.
-- [ ] **Tests:** the basic per-screen smoke checks run once against the compose stack; a CI job that does a clean-checkout quick start and fails if it does not come up healthy; the load test and cache replay with their numbers checked into `bench/results`.
+### Phase 13: evidence and README (deployment deferred)
+- [ ] **BE** `Dockerfile` for the service and for `web/`; compose finalised; `docker compose up` quick start. **Deferred by decision: no deployment for now.**
+- [x] **BE** Load test and cache replay with measured numbers (`bench/`, `bench/results.md`), machine stated. Written as a small Go program instead of k6, which is not installed here; it measures the same things.
+- [x] **FE** Crash-recovery demo recorded as a GIF from a replay of a real recovered run (`docs/img/crash-recovery.gif`), plus a terminal demo (`scripts/demo.sh`, `make demo`) with its own database and ports.
+- [x] README per the spec's checklist, including Known limits, with screenshots of every screen that matters in both themes where it differs.
+- [x] **Tests:** the Phase 12 chaos test is the evidence for crash safety; the reduced run is recorded in the README.
+- [ ] A CI job that does a clean-checkout quick start. Deferred with deployment.
 
 **Verify with me**
-- Backend and frontend: from a clean checkout, follow the README quick start and time it (about 60 seconds); watch a run survive `kill -9` in the dashboard; run `make bench` and compare the numbers with the README table.
+- Run `make up` then `scripts/demo.sh` and read the output; open the README and check the screenshots and the results table against `bench/results.md`.
 
 ### Cross-cutting checklist before calling it done
 - [ ] No secrets in logs or admin responses; a `gitleaks`-style scan is clean.

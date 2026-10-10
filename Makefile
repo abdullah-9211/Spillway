@@ -6,7 +6,7 @@ GO ?= go
 STATICCHECK ?= staticcheck
 SQLC ?= sqlc
 
-.PHONY: chaos demo-data demo-data-clear up down migrate seed serve test test-unit test-integration lint sqlc web-install web-dev web-check web-build
+.PHONY: demo bench chaos demo-data demo-data-clear up down migrate seed serve test test-unit test-integration lint sqlc web-install web-dev web-check web-build
 
 up: ## start Postgres and Redis and wait until healthy
 	docker compose up -d --wait
@@ -37,6 +37,12 @@ test-unit:
 # Integration tests write real rows, so they get their own database and never touch the one the dashboard uses.
 TEST_DB ?= spillway_test
 TEST_DATABASE_URL ?= postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:$(POSTGRES_PORT)/$(TEST_DB)?sslmode=disable
+
+demo: ## the crash-recovery demo in a terminal (needs `make up`); `scripts/demo.sh stop` ends it
+	scripts/demo.sh
+
+bench: ## gateway latency, throughput and cache numbers; see bench/results.md for how it was run
+	@echo "see the header of bench/main.go for the three commands"; $(GO) run ./bench -h 2>&1 | head -20
 
 chaos: ## the chaos test, reduced (CHAOS_RUNS=10); needs `make up`. CI runs the full 50
 	@docker compose exec -T postgres psql -U $(POSTGRES_USER) -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$(TEST_DB)'" | grep -q 1 \

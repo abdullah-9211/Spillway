@@ -1,0 +1,10 @@
+# Catalog for scripts/demo.sh: the fake provider stands in for a model, and leases are short so a crash is noticed in seconds.
+providers:
+  openai: { api_key_env: OPENAI_API_KEY, base_url: http://localhost:9989/v1 }
+models:
+  - { id: demo-model, provider: openai, upstream: demo, input_usd_per_mtok: 3.00, output_usd_per_mtok: 15.00, context_window: 128000, tags: [fast] }
+policies:
+  - { name: default, type: fixed, model: demo-model }
+gateway: { request_timeout: 30s, first_byte_timeout: 10s, max_retries: 1 }
+cache: { exact_ttl: 24h, scope: key, semantic_threshold: 0.95 }
+runs: { lease_ttl: 6s, heartbeat: 2s, workers: 4, max_steps: 50, max_cost_usd: 1.0, deadline: 15m, tool_error_budget: 3 }
