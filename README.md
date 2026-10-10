@@ -26,6 +26,8 @@ make up            # Postgres and Redis in Docker, once
 scripts/demo.sh    # builds, starts a tiny stack, kills a worker mid-call, shows the result
 ```
 
+(Needs bash: macOS, Linux, or WSL on Windows. Setup is under [Run it yourself](#run-it-yourself).)
+
 The script starts a run that calls a side-effecting tool four times, `kill -9`s the worker while the third call is in
 flight, starts a new worker, and prints the run's log. This is a real output (trimmed to the interesting rows):
 
@@ -134,21 +136,59 @@ playground, only for admins, and never reaches the production endpoint.
 
 ## How it works
 
+```mermaid
+flowchart TB
+    A1["Your app<br/>OpenAI SDK, POST /v1/chat/completions"]
+    A2["Your app<br/>POST /v1/runs"]
+    DASH["Dashboard<br/>Next.js"]
+
+    subgraph GW["Gateway"]
+        direction LR
+        P["Auth and<br/>routing plan"] --> L["Rate limit<br/>and budget"] --> C["Cache"] --> X["Execute: retries,<br/>breaker, fallback"]
+    end
+
+    subgraph RE["Run engine"]
+        direction LR
+        R["Runs API"] --> W["Workers: claim,<br/>lease, heartbeat"]
+    end
+
+    ADM["Admin API"]
+    PR["Model providers<br/>OpenAI, Anthropic, Google, Ollama"]
+    T["Tools<br/>HTTP and MCP servers"]
+    PG[("Postgres<br/>step log, usage, keys, tools")]
+    RD[("Redis<br/>rate limits, exact cache")]
+
+    A1 --> P
+    A2 --> R
+    W -- "model call" --> P
+    X --> PR
+    W -- "tool call, signed,<br/>idempotency key" --> T
+    W <--> PG
+    L <--> RD
+    DASH --> ADM --> PG
 ```
-                     ┌───────────────────────────── Spillway (Go) ─────────────────────────────┐
-  your app ─ /v1/chat/completions ─▶ auth ▶ plan ▶ rate limit ▶ budget ▶ cache ▶ executor ──▶ OpenAI
-  (OpenAI SDK)                        │                                          │  retries      Anthropic
-                                      │                                          │  breaker      Google
-  your app ─ POST /v1/runs ──────────▶│ runs table (a projection + a lease)      │  fallback     Ollama
-                                      │        ▲                                 │
-                                      │        │ claim, heartbeat, fenced append │
-                                      │   workers ── model call ─ through the gateway above
-                                      │        └──── tool call ─ HTTP or MCP, signed, idempotency key
-                                      └────────────────────────────┬─────────────────────────────┘
-                              Postgres (run_steps = the log, usage, keys, tools)    Redis (limits, cache)
-                                                                  │
-  dashboard (Next.js) ◀── session-token proxy ◀── /admin/* ◀─────┘     /metrics (Prometheus), OpenTelemetry
+
+The life of a run:
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> queued
+    queued --> running: claimed
+    running --> waiting_tool: tool call
+    waiting_tool --> running: result
+    running --> waiting_human: asks first
+    waiting_human --> running: approved
+    waiting_human --> failed: rejected
+    running --> sleeping: asks to wait
+    sleeping --> running: wake time
+    running --> succeeded: done
+    running --> failed: limit hit
+    running --> cancelled: cancelled
 ```
+
+If a worker dies while a run is `running` or `waiting_tool`, its lease runs out and another worker claims the run and
+carries on from the log.
 
 **The gateway path.** Each request is authenticated, planned (which model, in what fallback order), checked against the
 key's rate limit and budget, looked up in the cache, then executed with retries, a per-provider circuit breaker and
@@ -161,41 +201,6 @@ replaying it. A worker claims a run with a lease, renews it by heartbeat, and wr
 Routing policies you can configure in `config/models.yaml`: a fixed model with fallbacks, an ordered fallback chain, the
 cheapest model with a tag, a weighted A/B split with sticky buckets, and hedging (start the next model if the first is
 slow).
-
----
-
-## Design decisions
-
-**Why an append-only step log.** A crash can happen between any two lines of code. If state is a log, resuming is
-replaying it, and "what happened" is a query rather than a guess. It also makes the dashboard honest: the graph is
-drawn from the same rows the engine resumes from.
-
-**Why leases and a fencing epoch.** A worker that is paused for a minute (a GC stall, a laptop lid) looks dead, so
-another worker takes over. The paused one then wakes up and tries to write. Each claim bumps `lease_epoch`, and every
-append is `INSERT ... WHERE the lease still matches`, so the old worker's write is refused. A unique index on terminal
-rows is the second line of defence.
-
-**Why re-issue instead of "exactly once".** No system can make a remote side effect happen exactly once on its own. What
-it can do is send the same idempotency key every time (`sha256(run_id : step_no)`) and record, in the log, that a step
-was re-issued. A receiver that honours the key gets exactly-once; one that ignores it gets at-least-once, and the log
-tells you which steps to look at.
-
-**Why the run loop lives in the runtime.** The client states a goal, tools and limits. The runtime owns the loop, the
-limits (steps, cost, deadline), compaction, approvals and sleeping. That is what makes crash recovery possible without
-the client's cooperation.
-
-**Why approvals and sleeps release the run.** A run waiting for a person holds no lease and no worker. The decision is
-a row in the log, so it works when the original worker is long gone. Time spent waiting for a person does not count
-against the deadline.
-
-**What I would change at 100x.**
-- Postgres is the queue (`FOR UPDATE SKIP LOCKED`). That is fine to thousands of runs per second; past that, move claims to
-  a dedicated queue and keep Postgres as the log.
-- `run_steps` needs partitioning by time and an archive path for old runs.
-- The usage write queue is in-process. At scale it should be a stream with replay.
-- The event stream uses Postgres `LISTEN/NOTIFY` as a wakeup. Many API instances would want a shared fan-out.
-- Budgets are checked before a call and recorded after it, so they are approximate under heavy concurrency. A reservation
-  scheme in Redis would make them tight.
 
 ---
 
@@ -232,88 +237,177 @@ go run ./bench -gateway http://localhost:8081 -key $KEY
 
 ## Run it yourself
 
-You need Go 1.26 or later, Docker, and Node 20 or later.
+### 1. Install what you need
+
+You need **Go 1.26 or newer**, **Node.js 20 or newer** (with npm), **Docker** with Compose, and **git**. Docker runs
+Postgres and Redis; everything else runs on your machine. macOS, Linux and Windows are covered below.
+
+<details open>
+<summary><b>macOS</b></summary>
 
 ```bash
-cp .env.example .env           # edit the passwords and ADMIN_SESSION_SECRET
-make up                        # Postgres (pgvector) and Redis
-make migrate seed              # schema, and the admin and viewer accounts from .env
-make serve                     # the API on :8080 (add your provider keys to .env, or use the fake provider below)
+# Homebrew (https://brew.sh) if you do not have it
+brew install go node git
+brew install --cask docker      # then open the Docker app once, so the engine starts
+xcode-select --install          # gives you `make`
+```
+</details>
 
-cd web && npm install && npm run dev      # the dashboard on :3000
+<details>
+<summary><b>Linux (Debian or Ubuntu)</b></summary>
+
+```bash
+sudo apt update && sudo apt install -y git make curl
+
+# Go: the apt package is usually too old. Use the official tarball (any 1.26+ from https://go.dev/dl/).
+curl -LO https://go.dev/dl/go1.26.0.linux-amd64.tar.gz
+sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.26.0.linux-amd64.tar.gz
+echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.profile && . ~/.profile
+
+# Node.js 22
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt install -y nodejs
+
+# Docker Engine with Compose, then log out and back in so your user may use it
+curl -fsSL https://get.docker.com | sh && sudo usermod -aG docker $USER
 ```
 
-No provider keys? Use the fake one. It speaks the OpenAI protocol and can return errors and delays on demand:
+On Fedora use `dnf` for git, make and nodejs; on Arch use `pacman`. Go and Docker install the same way.
+</details>
 
-```bash
-go run ./cmd/fakeprovider -addr :9999 &
-# then point a provider's base_url in config/models.yaml at http://localhost:9999/v1
+<details>
+<summary><b>Windows</b></summary>
+
+**Easiest: WSL 2.** In an administrator PowerShell run `wsl --install`, restart, and open the Ubuntu app. Install
+[Docker Desktop](https://www.docker.com/products/docker-desktop/) and turn on *Settings, Resources, WSL integration* for
+Ubuntu. Then follow the **Linux** steps above inside Ubuntu, clone the repository *inside* the Ubuntu filesystem (not under
+`/mnt/c`), and use the macOS and Linux commands below as written.
+
+**Native, without WSL.** In PowerShell:
+
+```powershell
+winget install GoLang.Go OpenJS.NodeJS.LTS Git.Git Docker.DockerDesktop
 ```
 
-Then:
+Restart PowerShell, start Docker Desktop once, and use the *Windows (PowerShell)* commands below. Windows has no `make`
+and no bash, so `scripts/demo.sh` and the `make` shortcuts need WSL; the PowerShell commands cover everything else.
+</details>
+
+### 2. Get the code and download the dependencies
+
+The same on every system:
 
 ```bash
-go run ./cmd/spillway keys create --name me               # prints the key once
-export SPILLWAY_API_KEY=spw_...
+git clone https://github.com/abdullah-9211/Spillway.git
+cd Spillway
+go mod download                 # Go dependencies
+cd web && npm install && cd ..  # dashboard dependencies
+```
+
+### 3. Configure, start, and sign in
+
+This uses the built-in fake model provider, so you need no API keys. It answers like an OpenAI-compatible model and can
+be told to fail, which is also how the demo works.
+
+**macOS, Linux, WSL**
+
+```bash
+cp .env.example .env                       # then edit it, see the three lines below
+cp web/.env.example web/.env.local
+make up                                    # Postgres and Redis in Docker, waits until healthy
+make migrate seed                          # creates the schema and the admin and viewer accounts
+
+go run ./cmd/fakeprovider -addr :9989 &    # the fake model provider
+make serve                                 # terminal 1: the API and workers on :8080
+cd web && npm run dev                      # terminal 2: the dashboard on :3000
+```
+
+**Windows (PowerShell)**
+
+```powershell
+copy .env.example .env                     # then edit it, see the three lines below
+copy web\.env.example web\.env.local
+docker compose up -d --wait
+
+# Load .env into this PowerShell window. Repeat this line in every new window you open for the Go service.
+Get-Content .env | Where-Object { $_ -match '^\s*[A-Za-z_]+=' } | ForEach-Object { $k, $v = $_ -split '=', 2; Set-Item "env:$k" $v }
+
+go run ./cmd/spillway migrate
+go run ./cmd/spillway seed
+
+Start-Process powershell -ArgumentList '-NoExit','-Command','go run ./cmd/fakeprovider -addr :9989'
+go run ./cmd/spillway serve                # this window: the API and workers on :8080
+
+# in a second PowerShell window:
+cd web; npm run dev                        # the dashboard on :3000
+```
+
+**The three lines to change in `.env`** (they work with the fake provider and the seeded accounts; also give the four `SEED_*` passwords at least 8 characters):
+
+```
+SPILLWAY_CONFIG=config/demo.yaml
+OPENAI_API_KEY=anything
+ADMIN_SESSION_SECRET=<any long random string, e.g. the output of: openssl rand -base64 32>
+```
+
+Open <http://localhost:3000> and sign in with `SEED_ADMIN_USER` and `SEED_ADMIN_PASSWORD` from your `.env` (or the
+viewer account to see the read-only view).
+
+**Use real providers instead.** Leave `SPILLWAY_CONFIG=config/models.yaml`, put your `ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY` and `GOOGLE_API_KEY` in `.env`, and check the `upstream` model ids and prices in
+`config/models.yaml` (the prices there are placeholders).
+
+### 4. Make a first call
+
+```bash
+go run ./cmd/spillway keys create --name me          # prints an API key once: spw_...
+export SPILLWAY_API_KEY=spw_...                      # PowerShell: $env:SPILLWAY_API_KEY = "spw_..."
+
+go run ./cmd/spillway runs create --wait "Summarise the open incidents"
 curl localhost:8080/v1/chat/completions -H "Authorization: Bearer $SPILLWAY_API_KEY" \
   -H 'content-type: application/json' -d '{"model":"default","messages":[{"role":"user","content":"hello"}]}'
-go run ./cmd/spillway runs create --wait "Summarise the open incidents"
 ```
 
-Model prices in `config/models.yaml` are placeholders until you fill in current provider prices; cost shows as $0
-until you do. The dashboard's two roles: **admin** can change things, **viewer** can only look.
+On Windows PowerShell use `curl.exe`, and put the JSON body in a file with `-d @body.json`.
+The run appears on the dashboard's Runs page as it executes.
 
-### Useful commands
+### 5. Run the demo and the tests
 
-| | |
-|---|---|
-| `make test` | unit and integration tests with `-race` (needs `make up`) |
-| `make chaos` | the crash test, reduced to 10 runs |
-| `make demo` | the crash-recovery demo above |
-| `make demo-data` | invented usage numbers, so the dashboard has something to show |
-| `spillway keys create\|list\|revoke` | API keys |
-| `spillway tools add\|list\|discover\|rm` | tool and MCP server registry |
-| `spillway runs create\|get\|steps\|approve\|reject\|cancel` | runs, over the HTTP API |
-| `/metrics` | Prometheus; try `sum by (outcome) (rate(spillway_gateway_requests_total[5m]))` |
+| | macOS, Linux, WSL | Windows (PowerShell) |
+|---|---|---|
+| Crash-recovery demo | `make up && scripts/demo.sh` | use WSL |
+| Go tests | `make test` | `go test ./...` (integration tests also need `docker compose up -d --wait`) |
+| Reduced chaos test | `make chaos` | use WSL |
+| Dashboard tests | `cd web && npm test` | `cd web; npm test` |
+| Demo data for the usage page | `make demo-data` | use WSL |
+
+The Go tests run with `-race` through `make`; the race detector needs a C compiler on Windows, which is why the
+PowerShell line leaves it out.
+
+### Everyday commands
+
+```bash
+spillway keys create | list | revoke            # API keys
+spillway tools add | list | discover | rm       # tools and MCP servers
+spillway runs create | get | steps | approve | reject | cancel
+```
+
+Use `go run ./cmd/spillway ...` while developing. `/metrics` serves Prometheus; try
+`sum by (outcome) (rate(spillway_gateway_requests_total[5m]))`.
 
 ---
 
 ## Known limits
 
-Stated plainly:
-
-- **Exactly-once side effects depend on the receiver.** Spillway re-issues an interrupted step with the same idempotency
-  key and says so in the log. If the tool does not deduplicate by that key, the effect can happen twice. The same holds
-  for MCP servers, which receive the key in `_meta`.
-- **Budgets are approximate.** Spend is checked before a call and recorded after it, so concurrent calls can overshoot
-  a budget by a little.
-- **Streams cannot fail over after the first byte.** The client gets an error chunk.
-- **Model calls inside runs are not streamed.** The timeline shows whole steps appearing, not tokens.
+- **Exactly-once side effects depend on the receiver.** Spillway re-sends the same idempotency key after a crash and
+  records the re-issue. A tool that ignores the key can apply the effect twice. The same holds for MCP servers.
+- **Budgets are approximate.** Spend is checked before a call and recorded after, so concurrent calls can overshoot a
+  little.
+- **Streams cannot fail over after the first byte**, and model calls inside runs are not streamed.
 - **A run nobody decides stays waiting** past its deadline until someone approves, rejects or cancels it.
-- **MCP:** streamable HTTP only, tools only (no resources, prompts or sampling), static auth headers (no OAuth).
-- **Compaction uses a heuristic** (characters / 4) to decide when to summarise, and has only been run against the fake
-  provider.
-- **No tools screen in the dashboard.** Tools are managed with the CLI and the API; the New run form can pick them.
-- **No deployment packaging yet.** There are no Dockerfiles for the service or the dashboard; Docker is used for
-  Postgres and Redis only.
-- **Price numbers are placeholders** until filled with current provider prices.
-- **One known console warning:** a React hydration notice (#418) on every dashboard page. It is cosmetic.
+- **MCP is tools-only over streamable HTTP** with static auth headers.
+- **No deployment packaging.** Docker is used for Postgres and Redis only.
+- **Prices in `config/models.yaml` are placeholders.** The semantic cache has no hit-rate number yet.
 
----
-
-## Where things are
-
-| | |
-|---|---|
-| `cmd/spillway` | the binary: `serve`, `migrate`, `seed`, `keys`, `tools`, `runs` |
-| `cmd/fakeprovider`, `cmd/fakereceiver` | a fake model provider, and a tool endpoint that honours idempotency keys |
-| `internal/gateway`, `internal/provider` | routing, cache, limits, executor; one adapter per provider |
-| `internal/runs` | the run engine: replay, leases, approvals, sleep, compaction |
-| `internal/tools` | the tool registry, HTTP executor and MCP client |
-| `internal/api` | the public `/v1` API and the dashboard's `/admin` API (`api/openapi.yaml`) |
-| `web/` | the Next.js dashboard |
-| `config/models.yaml` | models, prices, routing policies, limits |
-| `docs/SPEC.md`, `docs/TECHNICAL.md` | what was decided, and how it is built (with the deviations listed) |
-| `bench/` | the load and cache benchmark, and its results |
+More detail on what was decided and why is in [docs/SPEC.md](docs/SPEC.md) and [docs/TECHNICAL.md](docs/TECHNICAL.md).
 
 License: Apache-2.0.
